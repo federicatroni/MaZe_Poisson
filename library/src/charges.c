@@ -85,6 +85,7 @@ double update_charges(
             app = g(px - ni*h, L, h) * g(py - nj*h, L, h) * g(pz - nk*h, L, h);
             upd = chg * app;
             q_tot += upd;
+            #pragma omp atomic update
             q[ni_loc * n2 + nj * n_grid + nk] += upd;
         }
     }
@@ -136,6 +137,7 @@ double update_charges(
             app = g(px - ni*h, L, h) * g(py - nj*h, L, h) * g(pz - nk*h, L, h);
             upd = chg * app;
             q_tot += upd;
+            #pragma omp atomic update
             q[ni * n2 + nj * n_grid + nk] += upd;
         }
     }

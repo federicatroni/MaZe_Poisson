@@ -183,6 +183,7 @@ struct grid {
 
     double tol;  // Tolerance for the LCG
     long int n_iters;  // Number of iterations for convergence of the LCG
+    long int field_update_count;  // Number of MaZe field updates since initialization
     int eps_phi_iters;  // Iterations for eps-phi self-consistency (field-dependent dielectric)
 
     void    (*free)( grid *);

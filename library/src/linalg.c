@@ -212,3 +212,29 @@ EXTERN_C double norm_inf(double *u, long int n) {
 }
 
 #endif // __LAPACK ///////////////////////////////////////////////////////////////////////////
+
+/*
+Compute the mean of an MPI-distributed vector.  local_n is the number of
+entries owned by this rank and global_n is the total number of entries.
+*/
+EXTERN_C double global_mean(const double *u, long int local_n, long int global_n) {
+    double sum = 0.0;
+
+    #pragma omp parallel for reduction(+:sum)
+    for (long int i = 0; i < local_n; i++) {
+        sum += u[i];
+    }
+    allreduce_sum(&sum, 1);
+
+    return sum / (double)global_n;
+}
+
+/* Remove only the spatially constant component of an MPI-distributed vector. */
+EXTERN_C void remove_global_mean(double *u, long int local_n, long int global_n) {
+    const double mean = global_mean(u, local_n, global_n);
+
+    #pragma omp parallel for
+    for (long int i = 0; i < local_n; i++) {
+        u[i] -= mean;
+    }
+}

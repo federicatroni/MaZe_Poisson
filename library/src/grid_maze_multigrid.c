@@ -10,6 +10,21 @@
 #include "mp_structs.h"
 #include "mpi_base.h"
 
+#define PB_GAUGE_FIX_STRIDE 1000L
+
+static int pb_operator_has_constant_zero_mode(const grid *g) {
+    /* The PB stencil used here is periodic.  At zero ionic strength k2 is
+       identically zero, so adding a constant to the potential changes no
+       physical field and belongs to the null space of the operator. */
+    return g->pb_enabled && g->kbar2 == 0.0;
+}
+
+static void center_pb_verlet_fields(grid *g) {
+    const long int global_size = (long int)g->n * g->n * g->n;
+    remove_global_mean(g->phi_n, g->size, global_size);
+    remove_global_mean(g->phi_p, g->size, global_size);
+}
+
 #ifdef __MPI
 void maze_multigrid_grid_init_mpi(grid *grid) {
     mpi_data *mpid = get_mpi_data();
@@ -108,6 +123,10 @@ void maze_multigrid_grid_init_field(grid *grid) {
         conj_grad(tmp, grid->y, grid->phi_n, grid->tol, grid->n_local, grid->n);
     }
 
+    if (pb_operator_has_constant_zero_mode(grid)) {
+        center_pb_verlet_fields(grid);
+    }
+
     mpi_grid_free(tmp, grid->n);
 }
 
@@ -123,6 +142,14 @@ int maze_multigrid_grid_update_field(grid *grid) {
     }
 
     int res;
+    const int zero_mode = pb_operator_has_constant_zero_mode(grid);
+
+    if (zero_mode) {
+        grid->field_update_count++;
+        if (grid->field_update_count % PB_GAUGE_FIX_STRIDE == 0) {
+            center_pb_verlet_fields(grid);
+        }
+    }
 
     if (grid->pb_enabled) {
         if (grid->eps_field_dep_enabled) {
@@ -132,9 +159,10 @@ int maze_multigrid_grid_update_field(grid *grid) {
                 grid
             );
         } else {
-            res = verlet_pb_multigrid(
+            res = verlet_pb_multigrid_with_retry(
                 grid->tol, grid->h, grid->phi_n, grid->phi_p, grid->q, grid->y,
-                grid->n_local, grid->n, grid->eps_x, grid->eps_y, grid->eps_z, grid->k2
+                grid->n_local, grid->n, grid->eps_x, grid->eps_y, grid->eps_z, grid->k2,
+                zero_mode
             );
         }
     } else{

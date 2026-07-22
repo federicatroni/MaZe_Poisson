@@ -24,6 +24,11 @@ int verlet_pb_multigrid(
     double tol, double h, double* phi, double* phi_prev, double* q, double* y, 
     int size1, int size2, double *eps_x, double *eps_y, double *eps_z, double *k2_screen
 );
+int verlet_pb_multigrid_with_retry(
+    double tol, double h, double* phi, double* phi_prev, double* q, double* y,
+    int size1, int size2, double *eps_x, double *eps_y, double *eps_z, double *k2_screen,
+    int zero_mode
+);
 int verlet_pb_multigrid_eps_field(
     double tol, double h, double* phi, double* phi_prev, double* q, double* y,
     int size1, int size2, double *eps_x, double *eps_y, double *eps_z, double *k2_screen,

@@ -123,6 +123,7 @@ grid * grid_init(int n, double L, double h, double tol, double eps, double eps_i
 
     new->tol = tol;
     new->n_iters = 0;
+    new->field_update_count = 0;
     new->eps_phi_iters = 0;
 
     new->free = grid_free;
