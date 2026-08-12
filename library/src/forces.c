@@ -4,6 +4,7 @@
 #include <math.h>
 #include "sphere_intersect.h"
 #include "mpi_base.h"
+#include "mp_structs.h"
 #include "linalg.h"
 
 static int pbc_grid_index(int idx, int n) {
@@ -483,6 +484,7 @@ void compute_stress_tensor_forces_dbc(
 void compute_stress_tensor_forces_pbc(
     int n, double eps_s, int n_p,
     double L, double h, double *phi, const unsigned int *region,
+    const unsigned int *st_owner,
     double *pos, double *solv_radii, double *out_forces
 ) {
     long int n2 = n * n;
@@ -532,6 +534,14 @@ void compute_stress_tensor_forces_pbc(
                     k = pbc_grid_index(kp + dk, n);
                     idx_a = grid_index_3d(i, j, k, n);
                     if (region != NULL && region[idx_a] == 1) {
+                        continue;
+                    }
+                    // Nodes shared by overlapping integration spheres belong to a
+                    // single particle, so that no face is summed more than once.
+                    // ST_OWNER_NONE means the map was never filled (dielectric
+                    // maps other than SPHERE): fall back to the old behaviour.
+                    if (st_owner != NULL && st_owner[idx_a] != ST_OWNER_NONE &&
+                        st_owner[idx_a] != (unsigned int)p_idx) {
                         continue;
                     }
                     k1 = pbc_grid_index(k + 1, n);
@@ -655,13 +665,14 @@ void compute_stress_tensor_forces_pbc(
 void compute_stress_tensor_forces(
     int n, double eps_s, int n_p,
     double L, double h, double *phi, const unsigned int *region,
+    const unsigned int *st_owner,
     double *pos, double *solv_radii, double *out_forces, int use_pbc
 )
 {
     memset(out_forces, 0, n_p * 3 * sizeof(double));
 
     if (use_pbc) {
-        compute_stress_tensor_forces_pbc(n, eps_s, n_p, L, h, phi, region, pos, solv_radii, out_forces);
+        compute_stress_tensor_forces_pbc(n, eps_s, n_p, L, h, phi, region, st_owner, pos, solv_radii, out_forces);
     } else {
         compute_stress_tensor_forces_dbc(n, eps_s, n_p, L, h, phi, region, pos, solv_radii, out_forces);
     }

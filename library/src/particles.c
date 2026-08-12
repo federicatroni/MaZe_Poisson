@@ -805,7 +805,7 @@ double particles_compute_forces_pb_stress_tensor(particles *p, grid *g) {
 
     compute_stress_tensor_forces(
         g->n, g->eps_s, p->n_p, g->L, g->h,
-        g->phi_n, g->region, p->pos, p->solv_radii, p->fcs_elec,
+        g->phi_n, g->region, g->st_owner, p->pos, p->solv_radii, p->fcs_elec,
         g->stress_tensor_bc_type == STRESS_TENSOR_BC_TYPE_PBC
     );
 

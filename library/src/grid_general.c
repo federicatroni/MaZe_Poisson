@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 
@@ -93,6 +94,7 @@ grid * grid_init(int n, double L, double h, double tol, double eps, double eps_i
     new->phi_n = NULL;
     new->ig2 = NULL;
     new->region = NULL;
+    new->st_owner = NULL;
 
 
     new->pb_enabled = 0;  // Poisson-Boltzmann not enabled by default
@@ -157,6 +159,12 @@ void grid_pb_init(
     grid->eps_z = mpi_grid_allocate(n_local, n);
     grid->k2 = (double *)malloc(grid->size * sizeof(double));
     grid->region = mpi_grid_allocate_uint(n_local, n);
+    grid->st_owner = mpi_grid_allocate_uint(n_local, n);
+    // Only `grid_update_eps_and_k2_sphere` fills the owner map. Leaving it at
+    // ST_OWNER_NONE makes the stress-tensor forces ignore it for the other
+    // dielectric maps, which keeps their behaviour unchanged.
+    memset(grid->st_owner - (long)n * n, 0xFF,
+           (size_t)(n_local + 2) * (size_t)n * (size_t)n * sizeof(unsigned int));
 }
 
 void grid_pb_free(grid *grid) {
@@ -167,6 +175,7 @@ void grid_pb_free(grid *grid) {
 
         free(grid->k2);
         mpi_grid_free_uint(grid->region, grid->n);
+        mpi_grid_free_uint(grid->st_owner, grid->n);
     }
 }
 
@@ -484,6 +493,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     double       *eps_z  = g->eps_z;
     double       *k2     = g->k2;
     unsigned int *region = g->region;
+    unsigned int *owner  = g->st_owner;
 
     /* ====================================================
      * STEP 1 - classify inside/outside using VdW spheres
@@ -565,12 +575,32 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
 
 
     /* ====================================================
-     * STEP 3 — mark enlarged sphere (region = 2)
+     * STEP 3 — mark enlarged sphere (region = 2) and assign an owner
     Solvent points (region = 0) inside the integration sphere of
     any particle are marked as 2.
     The radius used is the same as in compute_stress_tensor_forces_spherical:
     R = ceil(solv_radii / h) + 2 (in cell units)
+
+    Every node covered by at least one integration sphere is also assigned a
+    single owner: the particle whose centre is closest to the node, ties broken
+    by the lowest index. `compute_stress_tensor_forces_pbc` sums a face only if
+    the inner node belongs to the particle being processed, which keeps the
+    faces of overlapping spheres from being counted more than once (the total
+    surface still tiles the boundary of the union of the spheres exactly).
+    The comparison uses the true node-centre distance, not the integer offsets,
+    so that ties stay rare and do not depend on the lattice orientation.
      * ==================================================== */
+    double *owner_d2 = (double *)malloc((size_t)size * sizeof(double));
+    if (owner_d2 == NULL) {
+        mpi_fprintf(stderr, "Error: Unable to allocate memory for the integration sphere owner map\n");
+        exit(EXIT_FAILURE);
+    }
+    #pragma omp parallel for schedule(static)
+    for (long idx = 0; idx < size; idx++) {
+        owner[idx] = ST_OWNER_NONE;
+        owner_d2[idx] = 0.0;
+    }
+
     for (int q = 0; q < p->n_p; q++) {
         int iq_g = (int)round(p->pos[q * 3 + 0] / h);
         int jq   = (int)round(p->pos[q * 3 + 1] / h);
@@ -589,10 +619,25 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
                     if (ii < 0 || ii >= n_local) continue;
                     long idx = (long)kk + (long)jj * n + (long)ii * (long)n * n;
                     if (region[idx] == 0) region[idx] = 2u;
+
+                    // Minimum-image distance between the node and the particle
+                    double dx = ii_g * h - p->pos[q * 3 + 0];
+                    double dy = jj   * h - p->pos[q * 3 + 1];
+                    double dz = kk   * h - p->pos[q * 3 + 2];
+                    dx -= L * round(dx / L);
+                    dy -= L * round(dy / L);
+                    dz -= L * round(dz / L);
+                    double d2 = dx * dx + dy * dy + dz * dz;
+
+                    if (owner[idx] == ST_OWNER_NONE || d2 < owner_d2[idx]) {
+                        owner[idx] = (unsigned int)q;
+                        owner_d2[idx] = d2;
+                    }
                 }
             }
         }
     }
+    free(owner_d2);
 
     // Exchange the final region map used by the stress tensor
     mpi_grid_exchange_bot_top_uint(region, n_local, n);

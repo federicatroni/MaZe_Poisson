@@ -3,6 +3,9 @@
 
 #define MAP_NOT_INITIALIZED -1
 
+// Node not covered by any stress-tensor integration sphere
+#define ST_OWNER_NONE 0xFFFFFFFFu
+
 #define GRID_TYPE_NUM 5
 #define GRID_TYPE_LCG 0
 #define GRID_TYPE_FFT 1
@@ -161,6 +164,7 @@ struct grid {
     double *phi_n;  // Last potential
     double *ig2;  // Inverse of the laplacian
     unsigned int *region;  // Region type for each grid point (0=outside, 1=inside) defined in grid nodes
+    unsigned int *st_owner;  // Particle owning each node of an integration sphere (ST_OWNER_NONE = none), see `grid_update_eps_and_k2_sphere` STEP 3
 
     int precond_type;  // Type of the preconditioner
 
