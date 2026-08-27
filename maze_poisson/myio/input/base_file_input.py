@@ -112,10 +112,9 @@ class MDVariables(BaseFileInput):
     potential: str = 'TF'  # Type of potential to use
     potential_params_file: str = None  # File containing potential parameters
 
-    # Optional pairwise dielectric-saturation correction (Lenart et al., 2007).
+    # Optional pairwise reduction of the SPHERE dielectric map.
     # MANYBODY preserves the existing electrostatic path unchanged.
-    electrostatic_model: str = 'MANYBODY'  # MANYBODY or LENART_PAIRWISE
-    electrostatic_params_file: str = None
+    electrostatic_model: str = 'MANYBODY'  # MANYBODY or SPHERE_PAIRWISE_HARMONIC
 
     integrator: str = 'OVRVO'  # Integrator method
     method: str = 'FFT'  # Method for solving the Poisson equation
@@ -146,20 +145,17 @@ class MDVariables(BaseFileInput):
         if self.eps_map is None:
             self.eps_map = 'FIELD_DEPENDENT' if self.field_dependent_dielectric else 'TRADITIONAL'
         self.electrostatic_model = self.electrostatic_model.upper()
-        if self.electrostatic_model not in {'MANYBODY', 'LENART_PAIRWISE'}:
+        if self.electrostatic_model not in {'MANYBODY', 'SPHERE_PAIRWISE_HARMONIC'}:
             raise ValueError(
-                "electrostatic_model must be 'MANYBODY' or 'LENART_PAIRWISE'."
+                "electrostatic_model must be 'MANYBODY' or 'SPHERE_PAIRWISE_HARMONIC'."
             )
-        if self.electrostatic_model == 'LENART_PAIRWISE':
+        if self.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC':
             if not self.elec:
-                raise ValueError("LENART_PAIRWISE requires elec=true.")
+                raise ValueError("SPHERE_PAIRWISE_HARMONIC requires elec=true.")
             if self.poisson_boltzmann:
                 raise ValueError(
-                    "LENART_PAIRWISE requires poisson_boltzmann=false: the base field must use uniform eps_s."
-                )
-            if self.electrostatic_params_file is None:
-                raise ValueError(
-                    "LENART_PAIRWISE requires electrostatic_params_file."
+                    "SPHERE_PAIRWISE_HARMONIC requires poisson_boltzmann=false: "
+                    "the base field must use uniform eps_s."
                 )
 
     @property

@@ -107,7 +107,9 @@ void particles_init_potential(particles *p, int pot_type, double *pot_params);
 void particles_init_potential_tf(particles *p, double *pot_params);
 void particles_init_potential_lj(particles *p, double *pot_params);
 void particles_init_potential_sc(particles *p, double *pot_params);
-void particles_init_lenart_pairwise(particles *p, double eps_s, double *params);
+void particles_init_sphere_pairwise_harmonic(
+    particles *p, double eps_s, double eps_int, double *radii
+);
 void particles_update_nearest_neighbors_cic(particles *p);
 void particles_update_nearest_neighbors_spline(particles *p);
 
@@ -115,7 +117,7 @@ double particles_compute_forces_field(particles *p, grid *grid);
 double particles_compute_forces_tf(particles *p);
 double particles_compute_forces_lj(particles *p);
 double particles_compute_forces_sc(particles *p);
-double particles_compute_forces_lenart(particles *p);
+double particles_compute_forces_sphere_pairwise_harmonic(particles *p);
 double particles_compute_forces_pb(particles *p, grid *grid);
 void particles_compute_forces_tot(particles *p);
 
@@ -228,9 +230,10 @@ struct particles {
     double *tf_params;  // Parameters for the TF potential (7 x n_p x n_p)
     double *lj_params;  // Parameters for the LJ potential (4 x n_p x n_p)
     double *sc_params;  // Parameters for the SC potential (5)
-    int lenart_enabled;
-    double lenart_eps_s;
-    double *lenart_params;  // [r_m, sigma, eps_min] for every type pair
+    int sphere_pairwise_enabled;
+    double sphere_pairwise_eps_s;
+    double sphere_pairwise_eps_int;
+    double *sphere_pairwise_radii;
 
     // Poisson-Boltzmann specific
     int pb_enabled;  // Poisson-Boltzmann enabled

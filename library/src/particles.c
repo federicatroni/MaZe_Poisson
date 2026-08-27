@@ -94,8 +94,8 @@ particles * particles_init(int n, int n_p, int n_typ, double L, double h, int ca
     p->tf_params = NULL;
     p->lj_params = NULL;
     p->sc_params = NULL;
-    p->lenart_enabled = 0;
-    p->lenart_params = NULL;
+    p->sphere_pairwise_enabled = 0;
+    p->sphere_pairwise_radii = NULL;
 
     p->free = particles_free;
     p->init_potential = particles_init_potential;
@@ -158,8 +158,8 @@ void particles_free(particles *p) {
     if (p->lj_params != NULL) {
         free(p->lj_params);
     }
-    if (p->lenart_params != NULL) {
-        free(p->lenart_params);
+    if (p->sphere_pairwise_radii != NULL) {
+        free(p->sphere_pairwise_radii);
     }
 
     particles_pb_free(p);
@@ -187,16 +187,18 @@ void particles_init_potential(particles *p, int pot_type, double *pot_params) {
     }
 }
 
-void particles_init_lenart_pairwise(particles *p, double eps_s, double *params) {
-    long int n_params = 3L * p->n_typ * p->n_typ;
-    p->lenart_params = (double *)malloc(n_params * sizeof(double));
-    if (p->lenart_params == NULL) {
-        mpi_fprintf(stderr, "Could not allocate Lenart pairwise parameters.\n");
+void particles_init_sphere_pairwise_harmonic(
+    particles *p, double eps_s, double eps_int, double *radii
+) {
+    p->sphere_pairwise_radii = (double *)malloc(p->n_p * sizeof(double));
+    if (p->sphere_pairwise_radii == NULL) {
+        mpi_fprintf(stderr, "Could not allocate SPHERE pairwise radii.\n");
         exit(1);
     }
-    memcpy(p->lenart_params, params, n_params * sizeof(double));
-    p->lenart_eps_s = eps_s;
-    p->lenart_enabled = 1;
+    memcpy(p->sphere_pairwise_radii, radii, p->n_p * sizeof(double));
+    p->sphere_pairwise_eps_s = eps_s;
+    p->sphere_pairwise_eps_int = eps_int;
+    p->sphere_pairwise_enabled = 1;
 }
 
 void particles_init_potential_tf(particles *p, double *pot_params) {
@@ -431,13 +433,14 @@ double particles_compute_forces_lj(particles *p) {
     return compute_lj_forces(p->n_p, p->L, p->pos, p->lj_params, p->r_cut, p->fcs_noel);
 }
 
-double particles_compute_forces_lenart(particles *p) {
-    if (!p->lenart_enabled) {
+double particles_compute_forces_sphere_pairwise_harmonic(particles *p) {
+    if (!p->sphere_pairwise_enabled) {
         return 0.0;
     }
-    return compute_lenart_correction(
-        p->n_p, p->n_typ, p->L, p->lenart_eps_s, p->types, p->charges,
-        p->pos, p->lenart_params, p->fcs_elec
+    return compute_sphere_pairwise_harmonic_correction(
+        p->n_p, p->L, p->h, p->sphere_pairwise_eps_int,
+        p->sphere_pairwise_eps_s, p->charges, p->pos,
+        p->sphere_pairwise_radii, p->fcs_elec
     );
 }
 

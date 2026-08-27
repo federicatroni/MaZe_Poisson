@@ -70,9 +70,10 @@ capi.register_function(
     ],
 )
 
-# void solver_initialize_lenart_pairwise(double eps_s, double *params)
+# void solver_initialize_sphere_pairwise_harmonic(double eps_s, double eps_int, double *radii)
 capi.register_function(
-    'solver_initialize_lenart_pairwise', None, [
+    'solver_initialize_sphere_pairwise_harmonic', None, [
+        ctypes.c_double,
         ctypes.c_double,
         npct.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
     ],
@@ -130,7 +131,7 @@ capi.register_function(
 )
 
 capi.register_function(
-    'solver_compute_forces_lenart', ctypes.c_double, [],
+    'solver_compute_forces_sphere_pairwise_harmonic', ctypes.c_double, [],
 )
 
 # double solver_compute_forces_noel() {

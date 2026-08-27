@@ -280,17 +280,20 @@ double compute_lj_forces(int n_p, double L, double *pos, double *params, double 
 }
 
 /*
- * Add the short-range dielectric-saturation correction of Lenart et al.
- * to forces that already contain the homogeneous Coulomb contribution at eps_s.
- * params is laid out as [r_m, sigma, eps_min] for each ordered type pair.
+ * Pairwise reduction of the SPHERE dielectric map.  Across a layer of width h
+ * centred at contact, f is the fraction inside the ionic spheres and the
+ * dielectric is mixed harmonically:
+ *     1/eps(r) = f/eps_int + (1-f)/eps_s.
+ * The homogeneous 1/eps_s field is already present in forces; this routine
+ * adds only q_i q_j f (1/eps_int - 1/eps_s) / r and its exact derivative.
  */
-double compute_lenart_correction(
-    int n_p, int n_typ, double L, double eps_s, const int *types, const double *charges,
-    const double *pos, const double *params, double *forces
+double compute_sphere_pairwise_harmonic_correction(
+    int n_p, double L, double h, double eps_int, double eps_s,
+    const double *charges, const double *pos, const double *radii, double *forces
 ) {
     double correction_energy = 0.0;
     const int size = 3 * n_p;
-    const double r_cut = 0.5 * L;
+    const double delta_inv_eps = 1.0 / eps_int - 1.0 / eps_s;
 
     #pragma omp parallel reduction(+:correction_energy, forces[:size])
     {
@@ -307,27 +310,31 @@ double compute_lenart_correction(
                     r2 += dr[k] * dr[k];
                 }
                 const double r = sqrt(r2);
-                if (r == 0.0 || r >= r_cut) {
+                if (r == 0.0) {
                     continue;
                 }
 
-                const long idx = 3L * ((long)types[i] * n_typ + types[j]);
-                const double r_m = params[idx];
-                const double sigma = params[idx + 1];
-                const double eps_min = params[idx + 2];
-                const double half_delta = 0.5 * (eps_s - eps_min);
-                const double x = (r - r_m) / sigma;
-                const double tanh_x = tanh(x);
-                const double eps_d = 0.5 * (eps_min + eps_s) + half_delta * tanh_x;
-                const double deps_dr = half_delta * (1.0 - tanh_x * tanh_x) / sigma;
+                const double contact = radii[i] + radii[j];
+                const double lower = contact - 0.5 * h;
+                const double upper = contact + 0.5 * h;
+                double frac;
+                double dfrac_dr;
+                if (r <= lower) {
+                    frac = 1.0;
+                    dfrac_dr = 0.0;
+                } else if (r < upper) {
+                    frac = (upper - r) / h;
+                    dfrac_dr = -1.0 / h;
+                } else {
+                    continue;
+                }
+
                 const double qij = charges[i] * charges[j];
                 const double inv_r = 1.0 / r;
-                const double inv_eps = 1.0 / eps_d;
 
-                correction_energy += qij * inv_r * (inv_eps - 1.0 / eps_s);
-                const double f_mag = qij * (
-                    (inv_eps - 1.0 / eps_s) * inv_r * inv_r
-                    + deps_dr * inv_eps * inv_eps * inv_r
+                correction_energy += qij * delta_inv_eps * frac * inv_r;
+                const double f_mag = qij * delta_inv_eps * (
+                    frac * inv_r * inv_r - dfrac_dr * inv_r
                 );
                 for (int k = 0; k < 3; k++) {
                     const double f_k = f_mag * dr[k] * inv_r;

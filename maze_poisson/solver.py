@@ -91,7 +91,7 @@ class SolverMD(Logger):
 
         self.energy_nonpolar = 0.0
         self.potential_notelec = 0.0
-        self.energy_lenart_correction = 0.0
+        self.energy_sphere_pairwise_correction = 0.0
 
         if self.outset.print_restart:
             outset.restart_step = outset.restart_step or mdv.N_steps
@@ -314,62 +314,6 @@ class SolverMD(Logger):
 
         return lj_params_array
 
-    def get_lenart_params(self, particles) -> np.ndarray:
-        """Load Lenart dielectric parameters for every unique pair of species."""
-        params = pd.read_csv(self.mdv.electrostatic_params_file)
-        required = {'type1', 'type2', 'r_m_eps_ang', 'sigma_eps_ang', 'eps_min'}
-        missing = required - set(params.columns)
-        if missing:
-            raise ValueError(
-                f"Lenart parameter file is missing columns: {sorted(missing)}"
-            )
-        expected = self.N_typs * (self.N_typs + 1) // 2
-        if len(params) != expected:
-            raise ValueError(
-                f"Lenart parameter file must contain {expected} unique type pairs."
-            )
-
-        out = np.full((self.N_typs, self.N_typs, 3), np.nan, dtype=np.float64)
-        seen = set()
-        for row in params.itertuples(index=False):
-            try:
-                i = int(particles.loc[row.type1, 'enum'])
-                j = int(particles.loc[row.type2, 'enum'])
-            except KeyError as exc:
-                raise ValueError(f"Unknown particle type in Lenart parameters: {exc}") from exc
-            key = tuple(sorted((i, j)))
-            if key in seen:
-                raise ValueError(
-                    f"Duplicate Lenart parameters for {row.type1}/{row.type2}."
-                )
-            seen.add(key)
-            values = np.array(
-                [row.r_m_eps_ang / cst.a0, row.sigma_eps_ang / cst.a0, row.eps_min],
-                dtype=np.float64,
-            )
-            if values[0] < 0 or values[1] <= 0:
-                raise ValueError("Lenart r_m_eps_ang must be non-negative and sigma_eps_ang positive.")
-            if not 0 < values[2] <= self.gset.eps_s:
-                raise ValueError("Lenart eps_min must satisfy 0 < eps_min <= eps_s.")
-            out[i, j] = values
-            out[j, i] = values
-
-        if np.isnan(out).any():
-            raise ValueError("Lenart parameters are missing for one or more type pairs.")
-
-        r_cut = 0.5 * self.L
-        x = (r_cut - out[:, :, 0]) / out[:, :, 1]
-        eps_at_cut = 0.5 * (out[:, :, 2] + self.gset.eps_s) + 0.5 * (
-            self.gset.eps_s - out[:, :, 2]
-        ) * np.tanh(x)
-        relative_tail = np.max(np.abs(eps_at_cut - self.gset.eps_s) / self.gset.eps_s)
-        if relative_tail > 1e-8:
-            raise ValueError(
-                "Lenart dielectric correction has not decayed at L/2 "
-                f"(relative dielectric tail={relative_tail:.3e}); increase L or narrow the transition."
-            )
-        return np.ascontiguousarray(out.ravel(), dtype=np.float64)
-    
     def initialize_particles(self):
         """Initialize the particles."""
         self.logger.info(f"Reading particle definitions from file: {self.gset.particles_file}")
@@ -442,19 +386,39 @@ class SolverMD(Logger):
             pot_params
         )
 
-        if self.mdv.electrostatic_model == 'LENART_PAIRWISE':
-            self.logger.info(
-                "Enabling Lenart pairwise dielectric correction on the homogeneous eps_s field."
+        needs_radii = (
+            self.mdv.poisson_boltzmann
+            or self.mdv.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC'
+        )
+        radius = None
+        if needs_radii:
+            if 'radius' not in particles.columns:
+                raise ValueError(
+                    "Particle radii must be provided in species.csv for PB or SPHERE pairwise electrostatics."
+                )
+            radius = np.ascontiguousarray(
+                particles.loc[df['type'], 'radius'].values / cst.a0
+                + self.mdv.probe_radius,
+                dtype=np.float64,
             )
-            capi.solver_initialize_lenart_pairwise(
-                self.gset.eps_s, self.get_lenart_params(particles)
+
+        if self.mdv.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC':
+            if self.gset.eps_int <= 0 or self.gset.eps_s <= 0:
+                raise ValueError("SPHERE pairwise electrostatics requires positive eps_int and eps_s.")
+            if self.gset.eps_int > self.gset.eps_s:
+                raise ValueError("SPHERE pairwise electrostatics requires eps_int <= eps_s.")
+            if 2.0 * np.max(radius) + 0.5 * self.h >= 0.5 * self.L:
+                raise ValueError(
+                    "SPHERE pairwise correction reaches L/2; increase the box size."
+                )
+            self.logger.info(
+                "Enabling harmonic SPHERE pairwise correction on the homogeneous eps_s field."
+            )
+            capi.solver_initialize_sphere_pairwise_harmonic(
+                self.gset.eps_s, self.gset.eps_int, radius
             )
 
         if self.mdv.poisson_boltzmann:
-            if 'radius' not in particles.columns:
-                raise ValueError("Probe radius must be provided in the input file for Poisson-Boltzmann.")
-            radius = np.ascontiguousarray(particles.loc[df['type'], 'radius'].values, dtype=np.float64)
-            radius = radius / cst.a0 + self.mdv.probe_radius
             self.logger.info("Initializing particles for Poisson-Boltzmann.")
             capi.solver_initialize_particles_pois_boltz(
                 self.mdv.gamma_np_au, self.mdv.beta_np, radius
@@ -549,8 +513,10 @@ class SolverMD(Logger):
         """Compute the forces on the particles due to the electric field."""
         # self.logger.debug("Computing forces due to electric field...")
         capi.solver_compute_forces_elec()
-        if self.mdv.electrostatic_model == 'LENART_PAIRWISE':
-            self.energy_lenart_correction = capi.solver_compute_forces_lenart()
+        if self.mdv.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC':
+            self.energy_sphere_pairwise_correction = (
+                capi.solver_compute_forces_sphere_pairwise_harmonic()
+            )
 
     @Clock('forces_notelec')
     def compute_forces_notelec(self):
