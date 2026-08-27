@@ -92,7 +92,10 @@ particles * particles_init(int n, int n_p, int n_typ, double L, double h, int ca
     particle_charges_init(p, cas_type);
 
     p->tf_params = NULL;
+    p->lj_params = NULL;
     p->sc_params = NULL;
+    p->lenart_enabled = 0;
+    p->lenart_params = NULL;
 
     p->free = particles_free;
     p->init_potential = particles_init_potential;
@@ -152,6 +155,12 @@ void particles_free(particles *p) {
     if (p->sc_params != NULL) {
         free(p->sc_params);
     }
+    if (p->lj_params != NULL) {
+        free(p->lj_params);
+    }
+    if (p->lenart_params != NULL) {
+        free(p->lenart_params);
+    }
 
     particles_pb_free(p);
 
@@ -176,6 +185,18 @@ void particles_init_potential(particles *p, int pot_type, double *pot_params) {
         exit(1);
         break;
     }
+}
+
+void particles_init_lenart_pairwise(particles *p, double eps_s, double *params) {
+    long int n_params = 3L * p->n_typ * p->n_typ;
+    p->lenart_params = (double *)malloc(n_params * sizeof(double));
+    if (p->lenart_params == NULL) {
+        mpi_fprintf(stderr, "Could not allocate Lenart pairwise parameters.\n");
+        exit(1);
+    }
+    memcpy(p->lenart_params, params, n_params * sizeof(double));
+    p->lenart_eps_s = eps_s;
+    p->lenart_enabled = 1;
 }
 
 void particles_init_potential_tf(particles *p, double *pot_params) {
@@ -408,6 +429,16 @@ double particles_compute_forces_sc(particles *p) {
 
 double particles_compute_forces_lj(particles *p) { 
     return compute_lj_forces(p->n_p, p->L, p->pos, p->lj_params, p->r_cut, p->fcs_noel);
+}
+
+double particles_compute_forces_lenart(particles *p) {
+    if (!p->lenart_enabled) {
+        return 0.0;
+    }
+    return compute_lenart_correction(
+        p->n_p, p->n_typ, p->L, p->lenart_eps_s, p->types, p->charges,
+        p->pos, p->lenart_params, p->fcs_elec
+    );
 }
 
 double calc_h_ratio(double rad, double w2, double w3) {

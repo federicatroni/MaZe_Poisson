@@ -112,6 +112,11 @@ class MDVariables(BaseFileInput):
     potential: str = 'TF'  # Type of potential to use
     potential_params_file: str = None  # File containing potential parameters
 
+    # Optional pairwise dielectric-saturation correction (Lenart et al., 2007).
+    # MANYBODY preserves the existing electrostatic path unchanged.
+    electrostatic_model: str = 'MANYBODY'  # MANYBODY or LENART_PAIRWISE
+    electrostatic_params_file: str = None
+
     integrator: str = 'OVRVO'  # Integrator method
     method: str = 'FFT'  # Method for solving the Poisson equation
     tol: float = 1e-7  # Tolerance for convergence
@@ -140,6 +145,22 @@ class MDVariables(BaseFileInput):
             raise ValueError("dt_fs must be a positive value.")
         if self.eps_map is None:
             self.eps_map = 'FIELD_DEPENDENT' if self.field_dependent_dielectric else 'TRADITIONAL'
+        self.electrostatic_model = self.electrostatic_model.upper()
+        if self.electrostatic_model not in {'MANYBODY', 'LENART_PAIRWISE'}:
+            raise ValueError(
+                "electrostatic_model must be 'MANYBODY' or 'LENART_PAIRWISE'."
+            )
+        if self.electrostatic_model == 'LENART_PAIRWISE':
+            if not self.elec:
+                raise ValueError("LENART_PAIRWISE requires elec=true.")
+            if self.poisson_boltzmann:
+                raise ValueError(
+                    "LENART_PAIRWISE requires poisson_boltzmann=false: the base field must use uniform eps_s."
+                )
+            if self.electrostatic_params_file is None:
+                raise ValueError(
+                    "LENART_PAIRWISE requires electrostatic_params_file."
+                )
 
     @property
     def kBT(self):

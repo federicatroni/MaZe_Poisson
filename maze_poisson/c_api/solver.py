@@ -70,6 +70,14 @@ capi.register_function(
     ],
 )
 
+# void solver_initialize_lenart_pairwise(double eps_s, double *params)
+capi.register_function(
+    'solver_initialize_lenart_pairwise', None, [
+        ctypes.c_double,
+        npct.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+    ],
+)
+
 # void solverinitialize_integrator(int n_p, double dt, double T, double gamma, int itg_type, int itg_enabled) {
 capi.register_function(
     'solver_initialize_integrator', None, [
@@ -119,6 +127,10 @@ capi.register_function(
 # void solver_compute_forces_elec() {
 capi.register_function(
     'solver_compute_forces_elec', None, [],
+)
+
+capi.register_function(
+    'solver_compute_forces_lenart', ctypes.c_double, [],
 )
 
 # double solver_compute_forces_noel() {

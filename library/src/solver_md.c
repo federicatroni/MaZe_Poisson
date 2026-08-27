@@ -70,6 +70,10 @@ void solver_initialize_particles_pois_boltz(double gamma_np, double beta_np, dou
     particles_pb_init(g_particles, gamma_np, beta_np, solv_radii);
 }
 
+void solver_initialize_lenart_pairwise(double eps_s, double *params) {
+    particles_init_lenart_pairwise(g_particles, eps_s, params);
+}
+
 void solver_initialize_integrator(int n_p, double dt, double T, double gamma, int itg_type, int itg_enabled) {
     g_integrator = integrator_init(n_p, dt, itg_type);
 
@@ -145,6 +149,10 @@ int get_eps_phi_iters() {
 
 void solver_compute_forces_elec() {
     g_particles->compute_forces_field(g_particles, g_grid);
+}
+
+double solver_compute_forces_lenart() {
+    return particles_compute_forces_lenart(g_particles);
 }
 
 double solver_compute_forces_noel() {

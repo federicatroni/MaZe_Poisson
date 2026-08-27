@@ -279,6 +279,67 @@ double compute_lj_forces(int n_p, double L, double *pos, double *params, double 
     return potential_energy / 2;
 }
 
+/*
+ * Add the short-range dielectric-saturation correction of Lenart et al.
+ * to forces that already contain the homogeneous Coulomb contribution at eps_s.
+ * params is laid out as [r_m, sigma, eps_min] for each ordered type pair.
+ */
+double compute_lenart_correction(
+    int n_p, int n_typ, double L, double eps_s, const int *types, const double *charges,
+    const double *pos, const double *params, double *forces
+) {
+    double correction_energy = 0.0;
+    const int size = 3 * n_p;
+    const double r_cut = 0.5 * L;
+
+    #pragma omp parallel reduction(+:correction_energy, forces[:size])
+    {
+        #pragma omp for schedule(static)
+        for (int i = 0; i < n_p; i++) {
+            const int ip = 3 * i;
+            for (int j = i + 1; j < n_p; j++) {
+                const int jp = 3 * j;
+                double dr[3];
+                double r2 = 0.0;
+                for (int k = 0; k < 3; k++) {
+                    dr[k] = pos[ip + k] - pos[jp + k];
+                    dr[k] -= L * round(dr[k] / L);
+                    r2 += dr[k] * dr[k];
+                }
+                const double r = sqrt(r2);
+                if (r == 0.0 || r >= r_cut) {
+                    continue;
+                }
+
+                const long idx = 3L * ((long)types[i] * n_typ + types[j]);
+                const double r_m = params[idx];
+                const double sigma = params[idx + 1];
+                const double eps_min = params[idx + 2];
+                const double half_delta = 0.5 * (eps_s - eps_min);
+                const double x = (r - r_m) / sigma;
+                const double tanh_x = tanh(x);
+                const double eps_d = 0.5 * (eps_min + eps_s) + half_delta * tanh_x;
+                const double deps_dr = half_delta * (1.0 - tanh_x * tanh_x) / sigma;
+                const double qij = charges[i] * charges[j];
+                const double inv_r = 1.0 / r;
+                const double inv_eps = 1.0 / eps_d;
+
+                correction_energy += qij * inv_r * (inv_eps - 1.0 / eps_s);
+                const double f_mag = qij * (
+                    (inv_eps - 1.0 / eps_s) * inv_r * inv_r
+                    + deps_dr * inv_eps * inv_eps * inv_r
+                );
+                for (int k = 0; k < 3; k++) {
+                    const double f_k = f_mag * dr[k] * inv_r;
+                    forces[ip + k] += f_k;
+                    forces[jp + k] -= f_k;
+                }
+            }
+        }
+    }
+    return correction_energy;
+}
+
 
 /*
 Compute the particle-particle forces using the SC repulsive potential
