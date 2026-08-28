@@ -79,6 +79,17 @@ capi.register_function(
     ],
 )
 
+# void solver_initialize_ribar_window_pairwise(
+#     double eps_s, double eps_int, double window, double *radii)
+capi.register_function(
+    'solver_initialize_ribar_window_pairwise', None, [
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        npct.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+    ],
+)
+
 # void solverinitialize_integrator(int n_p, double dt, double T, double gamma, int itg_type, int itg_enabled) {
 capi.register_function(
     'solver_initialize_integrator', None, [
@@ -132,6 +143,10 @@ capi.register_function(
 
 capi.register_function(
     'solver_compute_forces_sphere_pairwise_harmonic', ctypes.c_double, [],
+)
+
+capi.register_function(
+    'solver_compute_forces_ribar_window_pairwise', ctypes.c_double, [],
 )
 
 # double solver_compute_forces_noel() {

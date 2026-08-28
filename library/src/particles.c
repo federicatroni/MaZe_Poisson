@@ -94,8 +94,8 @@ particles * particles_init(int n, int n_p, int n_typ, double L, double h, int ca
     p->tf_params = NULL;
     p->lj_params = NULL;
     p->sc_params = NULL;
-    p->sphere_pairwise_enabled = 0;
-    p->sphere_pairwise_radii = NULL;
+    p->pairwise_dielectric_model = PAIRWISE_DIELECTRIC_MODEL_NONE;
+    p->pairwise_dielectric_radii = NULL;
 
     p->free = particles_free;
     p->init_potential = particles_init_potential;
@@ -158,8 +158,8 @@ void particles_free(particles *p) {
     if (p->lj_params != NULL) {
         free(p->lj_params);
     }
-    if (p->sphere_pairwise_radii != NULL) {
-        free(p->sphere_pairwise_radii);
+    if (p->pairwise_dielectric_radii != NULL) {
+        free(p->pairwise_dielectric_radii);
     }
 
     particles_pb_free(p);
@@ -187,18 +187,41 @@ void particles_init_potential(particles *p, int pot_type, double *pot_params) {
     }
 }
 
+static void particles_init_pairwise_dielectric(
+    particles *p, double eps_s, double eps_int, double *radii, int model
+) {
+    if (p->pairwise_dielectric_model != PAIRWISE_DIELECTRIC_MODEL_NONE) {
+        mpi_fprintf(stderr, "A pairwise dielectric model is already initialized.\n");
+        exit(1);
+    }
+    p->pairwise_dielectric_radii = (double *)malloc(p->n_p * sizeof(double));
+    if (p->pairwise_dielectric_radii == NULL) {
+        mpi_fprintf(stderr, "Could not allocate pairwise dielectric radii.\n");
+        exit(1);
+    }
+    memcpy(p->pairwise_dielectric_radii, radii, p->n_p * sizeof(double));
+    p->pairwise_dielectric_eps_s = eps_s;
+    p->pairwise_dielectric_eps_int = eps_int;
+    p->pairwise_dielectric_model = model;
+}
+
 void particles_init_sphere_pairwise_harmonic(
     particles *p, double eps_s, double eps_int, double *radii
 ) {
-    p->sphere_pairwise_radii = (double *)malloc(p->n_p * sizeof(double));
-    if (p->sphere_pairwise_radii == NULL) {
-        mpi_fprintf(stderr, "Could not allocate SPHERE pairwise radii.\n");
-        exit(1);
-    }
-    memcpy(p->sphere_pairwise_radii, radii, p->n_p * sizeof(double));
-    p->sphere_pairwise_eps_s = eps_s;
-    p->sphere_pairwise_eps_int = eps_int;
-    p->sphere_pairwise_enabled = 1;
+    particles_init_pairwise_dielectric(
+        p, eps_s, eps_int, radii,
+        PAIRWISE_DIELECTRIC_MODEL_SPHERE_HARMONIC
+    );
+}
+
+void particles_init_ribar_window_pairwise(
+    particles *p, double eps_s, double eps_int, double window, double *radii
+) {
+    particles_init_pairwise_dielectric(
+        p, eps_s, eps_int, radii,
+        PAIRWISE_DIELECTRIC_MODEL_RIBAR_WINDOW
+    );
+    p->ribar_pairwise_window = window;
 }
 
 void particles_init_potential_tf(particles *p, double *pot_params) {
@@ -434,13 +457,24 @@ double particles_compute_forces_lj(particles *p) {
 }
 
 double particles_compute_forces_sphere_pairwise_harmonic(particles *p) {
-    if (!p->sphere_pairwise_enabled) {
+    if (p->pairwise_dielectric_model != PAIRWISE_DIELECTRIC_MODEL_SPHERE_HARMONIC) {
         return 0.0;
     }
     return compute_sphere_pairwise_harmonic_correction(
-        p->n_p, p->L, p->h, p->sphere_pairwise_eps_int,
-        p->sphere_pairwise_eps_s, p->charges, p->pos,
-        p->sphere_pairwise_radii, p->fcs_elec
+        p->n_p, p->L, p->h, p->pairwise_dielectric_eps_int,
+        p->pairwise_dielectric_eps_s, p->charges, p->pos,
+        p->pairwise_dielectric_radii, p->fcs_elec
+    );
+}
+
+double particles_compute_forces_ribar_window_pairwise(particles *p) {
+    if (p->pairwise_dielectric_model != PAIRWISE_DIELECTRIC_MODEL_RIBAR_WINDOW) {
+        return 0.0;
+    }
+    return compute_ribar_window_pairwise_correction(
+        p->n_p, p->L, p->ribar_pairwise_window,
+        p->pairwise_dielectric_eps_int, p->pairwise_dielectric_eps_s,
+        p->charges, p->pos, p->pairwise_dielectric_radii, p->fcs_elec
     );
 }
 

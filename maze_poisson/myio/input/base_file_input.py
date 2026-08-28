@@ -112,9 +112,10 @@ class MDVariables(BaseFileInput):
     potential: str = 'TF'  # Type of potential to use
     potential_params_file: str = None  # File containing potential parameters
 
-    # Optional pairwise reduction of the SPHERE dielectric map.
+    # Optional pairwise dielectric corrections. These do not build a grid map.
     # MANYBODY preserves the existing electrostatic path unchanged.
-    electrostatic_model: str = 'MANYBODY'  # MANYBODY or SPHERE_PAIRWISE_HARMONIC
+    electrostatic_model: str = 'MANYBODY'
+    ribar_window: float = 3.0 / a0  # Ribar outward dielectric ramp width in a.u.
 
     integrator: str = 'OVRVO'  # Integrator method
     method: str = 'FFT'  # Method for solving the Poisson equation
@@ -145,18 +146,22 @@ class MDVariables(BaseFileInput):
         if self.eps_map is None:
             self.eps_map = 'FIELD_DEPENDENT' if self.field_dependent_dielectric else 'TRADITIONAL'
         self.electrostatic_model = self.electrostatic_model.upper()
-        if self.electrostatic_model not in {'MANYBODY', 'SPHERE_PAIRWISE_HARMONIC'}:
+        pairwise_models = {'SPHERE_PAIRWISE_HARMONIC', 'RIBAR_WINDOW_PAIRWISE'}
+        if self.electrostatic_model not in {'MANYBODY', *pairwise_models}:
             raise ValueError(
-                "electrostatic_model must be 'MANYBODY' or 'SPHERE_PAIRWISE_HARMONIC'."
+                "electrostatic_model must be 'MANYBODY', "
+                "'SPHERE_PAIRWISE_HARMONIC', or 'RIBAR_WINDOW_PAIRWISE'."
             )
-        if self.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC':
+        if self.electrostatic_model in pairwise_models:
             if not self.elec:
-                raise ValueError("SPHERE_PAIRWISE_HARMONIC requires elec=true.")
+                raise ValueError(f"{self.electrostatic_model} requires elec=true.")
             if self.poisson_boltzmann:
                 raise ValueError(
-                    "SPHERE_PAIRWISE_HARMONIC requires poisson_boltzmann=false: "
+                    f"{self.electrostatic_model} requires poisson_boltzmann=false: "
                     "the base field must use uniform eps_s."
                 )
+        if self.electrostatic_model == 'RIBAR_WINDOW_PAIRWISE' and self.ribar_window <= 0:
+            raise ValueError("RIBAR_WINDOW_PAIRWISE requires ribar_window_ang > 0.")
 
     @property
     def kBT(self):

@@ -91,7 +91,7 @@ class SolverMD(Logger):
 
         self.energy_nonpolar = 0.0
         self.potential_notelec = 0.0
-        self.energy_sphere_pairwise_correction = 0.0
+        self.energy_pairwise_dielectric_correction = 0.0
 
         if self.outset.print_restart:
             outset.restart_step = outset.restart_step or mdv.N_steps
@@ -388,7 +388,9 @@ class SolverMD(Logger):
 
         needs_radii = (
             self.mdv.poisson_boltzmann
-            or self.mdv.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC'
+            or self.mdv.electrostatic_model in {
+                'SPHERE_PAIRWISE_HARMONIC', 'RIBAR_WINDOW_PAIRWISE'
+            }
         )
         radius = None
         if needs_radii:
@@ -416,6 +418,23 @@ class SolverMD(Logger):
             )
             capi.solver_initialize_sphere_pairwise_harmonic(
                 self.gset.eps_s, self.gset.eps_int, radius
+            )
+
+        if self.mdv.electrostatic_model == 'RIBAR_WINDOW_PAIRWISE':
+            if self.gset.eps_int <= 0 or self.gset.eps_s <= 0:
+                raise ValueError("Ribar window pairwise electrostatics requires positive eps_int and eps_s.")
+            if self.gset.eps_int > self.gset.eps_s:
+                raise ValueError("Ribar window pairwise electrostatics requires eps_int <= eps_s.")
+            if 2.0 * np.max(radius) + self.mdv.ribar_window >= 0.5 * self.L:
+                raise ValueError(
+                    "Ribar pairwise correction reaches L/2; increase the box size."
+                )
+            self.logger.info(
+                "Enabling Ribar outward linear-epsilon window on the homogeneous eps_s field."
+            )
+            capi.solver_initialize_ribar_window_pairwise(
+                self.gset.eps_s, self.gset.eps_int,
+                self.mdv.ribar_window, radius,
             )
 
         if self.mdv.poisson_boltzmann:
@@ -514,8 +533,12 @@ class SolverMD(Logger):
         # self.logger.debug("Computing forces due to electric field...")
         capi.solver_compute_forces_elec()
         if self.mdv.electrostatic_model == 'SPHERE_PAIRWISE_HARMONIC':
-            self.energy_sphere_pairwise_correction = (
+            self.energy_pairwise_dielectric_correction = (
                 capi.solver_compute_forces_sphere_pairwise_harmonic()
+            )
+        elif self.mdv.electrostatic_model == 'RIBAR_WINDOW_PAIRWISE':
+            self.energy_pairwise_dielectric_correction = (
+                capi.solver_compute_forces_ribar_window_pairwise()
             )
 
     @Clock('forces_notelec')

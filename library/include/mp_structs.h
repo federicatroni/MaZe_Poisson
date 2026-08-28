@@ -18,6 +18,10 @@
 #define PARTICLE_POTENTIAL_TYPE_LJ 1
 #define PARTICLE_POTENTIAL_TYPE_SC 2
 
+#define PAIRWISE_DIELECTRIC_MODEL_NONE 0
+#define PAIRWISE_DIELECTRIC_MODEL_SPHERE_HARMONIC 1
+#define PAIRWISE_DIELECTRIC_MODEL_RIBAR_WINDOW 2
+
 #define CHARGE_ASS_SCHEME_TYPE_NUM 3
 #define CHARGE_ASS_SCHEME_TYPE_CIC 0
 #define CHARGE_ASS_SCHEME_TYPE_SPLQUAD 1
@@ -110,6 +114,9 @@ void particles_init_potential_sc(particles *p, double *pot_params);
 void particles_init_sphere_pairwise_harmonic(
     particles *p, double eps_s, double eps_int, double *radii
 );
+void particles_init_ribar_window_pairwise(
+    particles *p, double eps_s, double eps_int, double window, double *radii
+);
 void particles_update_nearest_neighbors_cic(particles *p);
 void particles_update_nearest_neighbors_spline(particles *p);
 
@@ -118,6 +125,7 @@ double particles_compute_forces_tf(particles *p);
 double particles_compute_forces_lj(particles *p);
 double particles_compute_forces_sc(particles *p);
 double particles_compute_forces_sphere_pairwise_harmonic(particles *p);
+double particles_compute_forces_ribar_window_pairwise(particles *p);
 double particles_compute_forces_pb(particles *p, grid *grid);
 void particles_compute_forces_tot(particles *p);
 
@@ -230,10 +238,11 @@ struct particles {
     double *tf_params;  // Parameters for the TF potential (7 x n_p x n_p)
     double *lj_params;  // Parameters for the LJ potential (4 x n_p x n_p)
     double *sc_params;  // Parameters for the SC potential (5)
-    int sphere_pairwise_enabled;
-    double sphere_pairwise_eps_s;
-    double sphere_pairwise_eps_int;
-    double *sphere_pairwise_radii;
+    int pairwise_dielectric_model;
+    double pairwise_dielectric_eps_s;
+    double pairwise_dielectric_eps_int;
+    double *pairwise_dielectric_radii;
+    double ribar_pairwise_window;
 
     // Poisson-Boltzmann specific
     int pb_enabled;  // Poisson-Boltzmann enabled

@@ -347,6 +347,80 @@ double compute_sphere_pairwise_harmonic_correction(
     return correction_energy;
 }
 
+/*
+ * Pairwise Ribar dielectric window with pair-specific contact distances.
+ * For contact = R_i + R_j and outward width Delta:
+ *
+ *   eps(r) = eps_int                                      r <= contact
+ *          = eps_int + (eps_s-eps_int)(r-contact)/Delta  contact < r < contact+Delta
+ *          = eps_s                                        r >= contact+Delta.
+ *
+ * The homogeneous Coulomb contribution at eps_s is already in forces.  This
+ * routine adds the correction q_i q_j [1/eps(r)-1/eps_s]/r and its exact
+ * radial derivative.  This follows Ribar et al.'s linear ramp in eps rather
+ * than the harmonic (linear-in-1/eps) edge mixing used by SPHERE.
+ */
+double compute_ribar_window_pairwise_correction(
+    int n_p, double L, double window, double eps_int, double eps_s,
+    const double *charges, const double *pos, const double *radii, double *forces
+) {
+    double correction_energy = 0.0;
+    const int size = 3 * n_p;
+    const double deps_dr_window = (eps_s - eps_int) / window;
+
+    #pragma omp parallel reduction(+:correction_energy, forces[:size])
+    {
+        #pragma omp for schedule(static)
+        for (int i = 0; i < n_p; i++) {
+            const int ip = 3 * i;
+            for (int j = i + 1; j < n_p; j++) {
+                const int jp = 3 * j;
+                double dr[3];
+                double r2 = 0.0;
+                for (int k = 0; k < 3; k++) {
+                    dr[k] = pos[ip + k] - pos[jp + k];
+                    dr[k] -= L * round(dr[k] / L);
+                    r2 += dr[k] * dr[k];
+                }
+                const double r = sqrt(r2);
+                if (r == 0.0) {
+                    continue;
+                }
+
+                const double contact = radii[i] + radii[j];
+                const double upper = contact + window;
+                if (r >= upper) {
+                    continue;
+                }
+
+                double eps_d = eps_int;
+                double deps_dr = 0.0;
+                if (r > contact) {
+                    eps_d += deps_dr_window * (r - contact);
+                    deps_dr = deps_dr_window;
+                }
+
+                const double qij = charges[i] * charges[j];
+                const double inv_r = 1.0 / r;
+                const double inv_eps = 1.0 / eps_d;
+                const double delta_inv_eps = inv_eps - 1.0 / eps_s;
+
+                correction_energy += qij * delta_inv_eps * inv_r;
+                const double f_mag = qij * (
+                    delta_inv_eps * inv_r * inv_r
+                    + deps_dr * inv_eps * inv_eps * inv_r
+                );
+                for (int k = 0; k < 3; k++) {
+                    const double f_k = f_mag * dr[k] * inv_r;
+                    forces[ip + k] += f_k;
+                    forces[jp + k] -= f_k;
+                }
+            }
+        }
+    }
+    return correction_energy;
+}
+
 
 /*
 Compute the particle-particle forces using the SC repulsive potential

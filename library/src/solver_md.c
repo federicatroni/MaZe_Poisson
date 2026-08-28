@@ -76,6 +76,14 @@ void solver_initialize_sphere_pairwise_harmonic(
     particles_init_sphere_pairwise_harmonic(g_particles, eps_s, eps_int, radii);
 }
 
+void solver_initialize_ribar_window_pairwise(
+    double eps_s, double eps_int, double window, double *radii
+) {
+    particles_init_ribar_window_pairwise(
+        g_particles, eps_s, eps_int, window, radii
+    );
+}
+
 void solver_initialize_integrator(int n_p, double dt, double T, double gamma, int itg_type, int itg_enabled) {
     g_integrator = integrator_init(n_p, dt, itg_type);
 
@@ -155,6 +163,10 @@ void solver_compute_forces_elec() {
 
 double solver_compute_forces_sphere_pairwise_harmonic() {
     return particles_compute_forces_sphere_pairwise_harmonic(g_particles);
+}
+
+double solver_compute_forces_ribar_window_pairwise() {
+    return particles_compute_forces_ribar_window_pairwise(g_particles);
 }
 
 double solver_compute_forces_noel() {
