@@ -1,0 +1,32 @@
+name: build
+
+on: 
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: eessi/github-action-eessi@v3
+      - name: Build library
+        run: |
+          module load CMake/3.27.6-GCCcore-13.2.0
+          module load foss/2023b
+          module load buildenv/default-foss-2023b
+
+          mkdir _build
+          cmake -S./library -B_build\
+            -DCMAKE_INSTALL_PREFIX=./maze_poisson \
+            -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMP_USE_MPI=ON \
+            -DMP_USE_OPENMP=ON
+
+          cmake --build _build && \
+          cmake --install _build
+        shell: bash
+      
