@@ -313,30 +313,32 @@ void particles_init_potential_lj(particles *p, double *pot_params) {
 }
 
 void particles_init_potential_sc(particles *p, double *pot_params) {
-    double alpha, beta;
-    double nu, d, B_nu, r_cut;
-    double d_over_r_cut, d_over_r_cut_pow;
-
-    p->sc_params = (double *)malloc(5 * sizeof(double));
-
-    nu = pot_params[0];
-    d = pot_params[1];
-    B_nu = pot_params[2];
+    const int n_typ = p->n_typ;
+    const long int n_pairs = (long int)n_typ * n_typ;
+    p->sc_params = (double *)malloc(5 * n_pairs * sizeof(double));
+    if (p->sc_params == NULL) {
+        mpi_fprintf(stderr, "Could not allocate pair-specific SC parameters.\n");
+        exit(1);
+    }
 
     p->r_cut = 0.5 * p->L;
-    r_cut = p->r_cut;
+    const double r_cut = p->r_cut;
+    for (long int pair = 0; pair < n_pairs; pair++) {
+        const long int input_idx = 3 * pair;
+        const long int output_idx = 5 * pair;
+        const double nu = pot_params[input_idx];
+        const double d = pot_params[input_idx + 1];
+        const double B_nu = pot_params[input_idx + 2];
+        const double d_over_r_cut_pow = pow(d / r_cut, nu);
+        const double alpha = B_nu * nu * d_over_r_cut_pow / r_cut;
+        const double beta = -B_nu * d_over_r_cut_pow - alpha * r_cut;
 
-    d_over_r_cut = d / r_cut;
-    d_over_r_cut_pow = pow(d_over_r_cut, nu);
-
-    alpha = B_nu * nu * d_over_r_cut_pow / r_cut; 
-    beta = - B_nu * d_over_r_cut_pow - alpha * r_cut;
-
-    p->sc_params[0] = pot_params[0];
-    p->sc_params[1] = pot_params[1];
-    p->sc_params[2] = pot_params[2];
-    p->sc_params[3] = alpha;
-    p->sc_params[4] = beta;
+        p->sc_params[output_idx] = nu;
+        p->sc_params[output_idx + 1] = d;
+        p->sc_params[output_idx + 2] = B_nu;
+        p->sc_params[output_idx + 3] = alpha;
+        p->sc_params[output_idx + 4] = beta;
+    }
     p->compute_forces_noel = particles_compute_forces_sc;
 }
 
@@ -449,7 +451,10 @@ double particles_compute_forces_tf(particles *p) {
 }
 
 double particles_compute_forces_sc(particles *p) {
-    return compute_sc_forces(p->n_p, p->L, p->pos, p->sc_params, p->r_cut, p->fcs_noel);
+    return compute_sc_forces_pairwise(
+        p->n_p, p->n_typ, p->L, p->types, p->pos,
+        p->sc_params, p->r_cut, p->fcs_noel
+    );
 }
 
 double particles_compute_forces_lj(particles *p) { 

@@ -237,7 +237,7 @@ struct particles {
     double epsilon;
     double *tf_params;  // Parameters for the TF potential (7 x n_p x n_p)
     double *lj_params;  // Parameters for the LJ potential (4 x n_p x n_p)
-    double *sc_params;  // Parameters for the SC potential (5)
+    double *sc_params;  // Pair-specific SC parameters (5 x n_typ x n_typ)
     int pairwise_dielectric_model;
     double pairwise_dielectric_eps_s;
     double pairwise_dielectric_eps_int;

@@ -456,6 +456,7 @@ double compute_sc_forces(int n_p, double L, double *pos, double *params, double 
     #pragma \
         omp parallel private(i, j, k, ip, jp, r_diff, r_mag, f_mag, f_k, V_mag, d_over_r_pow) \
         reduction(+:potential_energy, forces[:size])
+    #pragma omp for schedule(static)
     for (i = 0; i < n_p; i++) {
         ip = 3 * i;
         for (j = i + 1; j < n_p; j++) {
@@ -485,6 +486,60 @@ double compute_sc_forces(int n_p, double L, double *pos, double *params, double 
             }
 
             potential_energy += V_mag;
+        }
+    }
+    return potential_energy;
+}
+
+/*
+Compute SC forces with one shifted-force parameter set per particle-type pair.
+Each interleaved parameter record is [nu, d, B_nu, alpha, beta].
+*/
+double compute_sc_forces_pairwise(
+    int n_p, int n_typ, double L, const int *types, double *pos,
+    double *params, double r_cut, double *forces
+) {
+    const int size = n_p * 3;
+    double potential_energy = 0.0;
+    memset(forces, 0, size * sizeof(double));
+
+    #pragma omp parallel reduction(+:potential_energy, forces[:size])
+    {
+        #pragma omp for schedule(static)
+        for (int i = 0; i < n_p; i++) {
+            const int ip = 3 * i;
+            for (int j = i + 1; j < n_p; j++) {
+                const int jp = 3 * j;
+                double r_diff[3];
+                double r2 = 0.0;
+                for (int k = 0; k < 3; k++) {
+                    double delta = pos[ip + k] - pos[jp + k];
+                    delta -= L * round(delta / L);
+                    r_diff[k] = delta;
+                    r2 += delta * delta;
+                }
+                const double r_mag = sqrt(r2);
+                if (r_mag > r_cut) {
+                    continue;
+                }
+                const long int pair = (long int)types[i] * n_typ + types[j];
+                const double *pair_params = params + 5 * pair;
+                const double nu = pair_params[0];
+                const double d = pair_params[1];
+                const double B_nu = pair_params[2];
+                const double alpha = pair_params[3];
+                const double beta = pair_params[4];
+                const double d_over_r_pow = pow(d / r_mag, nu);
+                const double V_mag = B_nu * d_over_r_pow + alpha * r_mag + beta;
+                const double f_mag = B_nu * nu * d_over_r_pow / r_mag - alpha;
+
+                for (int k = 0; k < 3; k++) {
+                    const double f_k = f_mag * r_diff[k] / r_mag;
+                    forces[ip + k] += f_k;
+                    forces[jp + k] -= f_k;
+                }
+                potential_energy += V_mag;
+            }
         }
     }
     return potential_energy;

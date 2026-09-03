@@ -245,9 +245,13 @@ class SolverMD(Logger):
 
         return tf_params_array
 
-    def get_sc_params(self) -> np.ndarray:
-        """Get the shared parameters for the SC potential."""
-        self.logger.info("Using SC potential with shared parameters (nu, d, B).")
+    def get_sc_params(self, particles) -> np.ndarray:
+        """Get pair-specific ``(nu, d, B)`` parameters for the SC potential.
+
+        A legacy CSV containing one ``nu,d`` row is expanded to every type pair.
+        Pair-specific files use ``type1,type2,nu,d`` and must contain every
+        unordered pair exactly once.
+        """
         if self.mdv.potential_params_file is None:
             raise ValueError("Potential parameters file must be provided for SC potential.")
 
@@ -257,23 +261,66 @@ class SolverMD(Logger):
         if not required_columns.issubset(sc_params.columns):
             raise ValueError(f"Potential parameters file must contain columns: {required_columns}")
 
-        if len(sc_params) != 1:
-            raise ValueError("Potential parameters file for SC must contain exactly one row.")
-
-        nu = sc_params['nu'].iloc[0]
-        d = sc_params['d'].iloc[0]
-        if nu <= 0 or d <= 0:
-            raise ValueError("Parameters 'nu' and 'd' must be strictly positive.")
-
         Am = 1.74
         Nc = 6
-        d_au = d / cst.a0  # convert d from Angstrom to Bohr
-        B_au = Am / (Nc * nu * d_au)  # au
-        
-        # Salva come vettore (es. per uso diretto nei kernel)
-        sc_params_array = np.array([nu, d_au, B_au], dtype=np.float64)
+        has_type1 = 'type1' in sc_params.columns
+        has_type2 = 'type2' in sc_params.columns
+        if has_type1 != has_type2:
+            raise ValueError("SC pair parameters require both 'type1' and 'type2' columns.")
 
-        return sc_params_array
+        if not has_type1:
+            if len(sc_params) != 1:
+                raise ValueError(
+                    "Legacy SC parameter files must contain exactly one 'nu,d' row. "
+                    "Use 'type1,type2,nu,d' for pair-specific parameters."
+                )
+            nu = float(sc_params['nu'].iloc[0])
+            d = float(sc_params['d'].iloc[0])
+            if not np.isfinite(nu) or not np.isfinite(d) or nu <= 0 or d <= 0:
+                raise ValueError("Parameters 'nu' and 'd' must be finite and strictly positive.")
+            d_au = d / cst.a0
+            B_au = Am / (Nc * nu * d_au)
+            self.logger.info(
+                "Using legacy shared SC parameters; expanding them to all type pairs."
+            )
+            pair_params = np.empty((self.N_typs, self.N_typs, 3), dtype=np.float64)
+            pair_params[:, :, :] = (nu, d_au, B_au)
+            return np.ascontiguousarray(pair_params.ravel(), dtype=np.float64)
+
+        expected = self.N_typs * (self.N_typs + 1) // 2
+        if len(sc_params) != expected:
+            raise ValueError(
+                f"SC parameter file must have {expected} unique unordered type pairs."
+            )
+        try:
+            particles.loc[sc_params['type1']]
+            particles.loc[sc_params['type2']]
+        except KeyError as e:
+            raise ValueError(f"Particle type not found in particles file: {e}") from e
+
+        pair_params = np.full((self.N_typs, self.N_typs, 3), np.nan, dtype=np.float64)
+        for row in sc_params.itertuples(index=False):
+            t1 = row.type1
+            t2 = row.type2
+            i = int(particles.loc[t1, 'enum'])
+            j = int(particles.loc[t2, 'enum'])
+            if not np.isnan(pair_params[i, j, 0]) or not np.isnan(pair_params[j, i, 0]):
+                raise ValueError(f"Duplicate or reversed duplicate SC pair: {t1}, {t2}.")
+            nu = float(row.nu)
+            d = float(row.d)
+            if not np.isfinite(nu) or not np.isfinite(d) or nu <= 0 or d <= 0:
+                raise ValueError(
+                    f"SC parameters for pair {t1}, {t2} must be finite and strictly positive."
+                )
+            d_au = d / cst.a0
+            values = (nu, d_au, Am / (Nc * nu * d_au))
+            pair_params[i, j] = values
+            pair_params[j, i] = values
+
+        if np.any(np.isnan(pair_params)):
+            raise ValueError("SC parameters for some particle-type pairs are missing.")
+        self.logger.info("Using pair-specific SC parameters (nu, d, B).")
+        return np.ascontiguousarray(pair_params.ravel(), dtype=np.float64)
 
     def get_lennard_jones_params(self, particles) -> np.ndarray:
         """Get the Lennard Jones parameters for the particles."""
@@ -375,7 +422,7 @@ class SolverMD(Logger):
         elif potential == 'LJ':
             pot_params = self.get_lennard_jones_params(particles)
         elif potential == 'SC':
-            pot_params = self.get_sc_params()
+            pot_params = self.get_sc_params(particles)
 
         # print(f"Using potential parameters: {pot_params}")
 

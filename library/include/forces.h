@@ -8,6 +8,10 @@ double compute_force_fd(
 );
 double compute_tf_forces(int n_p, double L, double *pos, double *params, double r_cut, double *forces);
 double compute_sc_forces(int n_p, double L, double *pos, double *params, double r_cut, double *forces);
+double compute_sc_forces_pairwise(
+    int n_p, int n_typ, double L, const int *types, double *pos,
+    double *params, double r_cut, double *forces
+);
 double compute_lj_forces(int n_p, double L, double *pos, double *params, double r_cut, double *forces);
 double compute_sphere_pairwise_harmonic_correction(
     int n_p, double L, double h, double eps_int, double eps_s,
