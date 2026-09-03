@@ -583,10 +583,12 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
 
     Every node covered by at least one integration sphere is also assigned a
     single owner: the particle whose centre is closest to the node, ties broken
-    by the lowest index. `compute_stress_tensor_forces_pbc` sums a face only if
-    the inner node belongs to the particle being processed, which keeps the
-    faces of overlapping spheres from being counted more than once (the total
-    surface still tiles the boundary of the union of the spheres exactly).
+    by the lowest index. The owner map defines the control volume
+    V_i = {nodes with st_owner == i} that `compute_stress_tensor_forces_pbc`
+    integrates the Maxwell stress tensor on: it is the Voronoi cell of i
+    restricted to the union of the integration spheres, so its boundary is
+    closed however much the spheres interpenetrate, and the wall separating two
+    overlapping spheres is a face of both control volumes with opposite normals.
     The comparison uses the true node-centre distance, not the integer offsets,
     so that ties stay rare and do not depend on the lattice orientation.
      * ==================================================== */
@@ -641,6 +643,10 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
 
     // Exchange the final region map used by the stress tensor
     mpi_grid_exchange_bot_top_uint(region, n_local, n);
+    // The owner of the neighbouring node is read too, and it can fall in the
+    // ghost slice of the adjacent rank. The reset loop above only covers
+    // [0, size), so the ghosts would otherwise stay stale from the second call on.
+    mpi_grid_exchange_bot_top_uint(owner, n_local, n);
 }
 
 void grid_update_eps_and_k2(grid *g, particles *p) {
