@@ -67,6 +67,8 @@ integrator * integrator_init(int n_p, double dt, int type);
 void grid_free(grid *grid);
 void particles_free(particles *p);
 void integrator_free(integrator *integrator);
+void ovrvo_integrator_init_type_thermostat(integrator *integrator, double T,
+                                           int n_typ, const double *gammas);
 
 void grid_pb_init(grid *grid, double w, double kbar2, int nonpolar_enabled, int eps_map_type, int pb_force_type, int stress_tensor_bc_type, double kBT, double eps_field_alpha);
 void grid_pb_free(grid *grid);
@@ -283,6 +285,9 @@ struct integrator {
     int enabled;  // Thermostat enabled
     double c1;  // Thermostat parameter
     double c2;  // Thermostat parameter
+    int n_typ;  // Number of type-specific thermostat entries
+    double *c1_by_type;  // Thermostat c1 indexed by particle type
+    double *c2_by_type;  // Thermostat c2 indexed by particle type
 
     void    (*part1)( integrator *, particles *);
     void    (*part2)( integrator *, particles *);

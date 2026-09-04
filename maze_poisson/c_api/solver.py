@@ -102,6 +102,18 @@ capi.register_function(
     ],
 )
 
+capi.register_function(
+    'solver_initialize_integrator_by_type', None, [
+        ctypes.c_int,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_int,
+        npct.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+        ctypes.c_int,
+        ctypes.c_int,
+    ],
+)
+
 # int solver_update_charges() {
 capi.register_function(
     'solver_update_charges', ctypes.c_int, [],

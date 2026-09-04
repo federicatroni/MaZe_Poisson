@@ -25,6 +25,9 @@ integrator * integrator_init(int n_p, double dt, int type) {
     new->enabled = INTEGRATOR_DISABLED;
     new->c1 = 1.0;
     new->c2 = 1.0;
+    new->n_typ = 0;
+    new->c1_by_type = NULL;
+    new->c2_by_type = NULL;
 
     switch (type) {
         case INTEGRATOR_TYPE_OVRVO:
@@ -41,5 +44,7 @@ integrator * integrator_init(int n_p, double dt, int type) {
 }
 
 void integrator_free(integrator *integrator) {
+    free(integrator->c1_by_type);
+    free(integrator->c2_by_type);
     free(integrator);
 }

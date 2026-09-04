@@ -85,6 +85,7 @@ class SolverMD(Logger):
         self.N_typs = gset.N_typs
 
         self.thermostat = mdv.thermostat
+        self.gamma_by_type = None
 
         self.n_iters = 0
         self.eps_phi_iters = 0
@@ -377,6 +378,8 @@ class SolverMD(Logger):
         particles.set_index('type', inplace=True)
         particles['enum'] = range(len(particles))
 
+        self.gamma_by_type = self._parse_species_gammas(particles)
+
 
         self.logger.info(f"Initializing particles with potential: {self.mdv.potential}")
         potential = self.mdv.potential.upper()
@@ -499,9 +502,15 @@ class SolverMD(Logger):
         itg_id = integrator_map[name]
 
         enabled = 1 if self.mdv.thermostat else 0
-        capi.solver_initialize_integrator(
-            self.N_p, self.mdv.dt, self.mdv.T, self.mdv.gamma, itg_id, enabled
-        )
+        if self.gamma_by_type is not None and name == 'OVRVO':
+            capi.solver_initialize_integrator_by_type(
+                self.N_p, self.mdv.dt, self.mdv.T, self.N_typs,
+                self.gamma_by_type, itg_id, enabled
+            )
+        else:
+            capi.solver_initialize_integrator(
+                self.N_p, self.mdv.dt, self.mdv.T, self.mdv.gamma, itg_id, enabled
+            )
 
     def initialize_md(self):
         """Initialize the first 2 steps for the MD and forces."""
@@ -686,6 +695,8 @@ class SolverMD(Logger):
         self.logger.info(f'  Potential: {self.mdv.potential}')
         self.logger.info(f'  Elec: {self.mdv.elec}    NotElec: {self.mdv.not_elec}')
         self.logger.info(f'  Temperature: {self.mdv.T} K,  Thermostat: {self.mdv.thermostat},  Gamma: {self.mdv.gamma}')
+        if self.gamma_by_type is not None:
+            self.logger.info(f'  Species gamma (atomic time^-1): {self.gamma_by_type.tolist()}')
         self.logger.info(f'  Velocity rescaling: {self.mdv.rescale}')
         if self.outset.print_restart:
             self.logger.info(f'  Restart step: {self.outset.restart_step}')
@@ -706,3 +717,20 @@ class SolverMD(Logger):
                 self.logger.info(f'  Stress tensor boundary: {self.mdv.stress_tensor_bc}')
             self.logger.info(f'  Gamma NP: {self.mdv.gamma_np}')
             self.logger.info(f'  Beta NP: {self.mdv.beta_np}')
+
+    @staticmethod
+    def _parse_species_gammas(particles):
+        """Return type-ordered friction frequencies (atomic time^-1), if supplied."""
+        if 'gamma' not in particles.columns:
+            return None
+        gamma = pd.to_numeric(particles['gamma'], errors='coerce')
+        invalid_finite = ~np.isfinite(gamma)
+        if invalid_finite.any():
+            missing = ', '.join(map(str, gamma.index[invalid_finite]))
+            raise ValueError(
+                f"Species gamma values must be provided for every type; missing/invalid: {missing}."
+            )
+        if (gamma <= 0).any():
+            invalid = ', '.join(map(str, gamma.index[gamma <= 0]))
+            raise ValueError(f"Species gamma values must be positive; invalid: {invalid}.")
+        return np.ascontiguousarray(gamma.values, dtype=np.float64)

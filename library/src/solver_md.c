@@ -104,6 +104,15 @@ void solver_initialize_integrator(int n_p, double dt, double T, double gamma, in
     }
 }
 
+void solver_initialize_integrator_by_type(int n_p, double dt, double T,
+                                          int n_typ, double *gammas,
+                                          int itg_type, int itg_enabled) {
+    g_integrator = integrator_init(n_p, dt, itg_type);
+    if (itg_enabled == 1 && itg_type == INTEGRATOR_TYPE_OVRVO) {
+        ovrvo_integrator_init_type_thermostat(g_integrator, T, n_typ, gammas);
+    }
+}
+
 int solver_update_charges() {
     int res = 0;
     double q_tot_loc;

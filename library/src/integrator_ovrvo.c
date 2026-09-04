@@ -48,24 +48,25 @@ void o_block(integrator *integrator, particles *p) {
     int rank = get_rank();
     long int ni;
     double dt = integrator->dt;
-    double c1 = integrator->c1;
     double T = integrator->T;
     double var1, var2;
     
     int n_p = p->n_p;
     double *vel = p->vel;
     double *masses = p->mass;
-
-    double c1_sqrt = sqrt(c1);
+    int *types = p->types;
 
     if (rank == 0) {
         // The original call to multivariate_normal had a diagonal covariance so we are fine
         // with using randn for each component to generate 3 independent random numbers with the respective
         // mean = 0.0 and variance = 1.0.
-        var2 = (1 - c1) * kB * T;
-        #pragma omp parallel for private(ni, var1)
+        #pragma omp parallel for private(ni, var1, var2)
         for (int i = 0; i < n_p; i++) {
+            double c1 = integrator->c1_by_type == NULL
+                ? integrator->c1 : integrator->c1_by_type[types[i]];
+            double c1_sqrt = sqrt(c1);
             ni = i * 3;
+            var2 = (1 - c1) * kB * T;
             var1 = sqrt(var2 / masses[i]);
             for (int j = 0; j < 3; j++) {
                 vel[ni + j] *= c1_sqrt;
@@ -79,15 +80,17 @@ void o_block(integrator *integrator, particles *p) {
 
 void v_block(integrator *integrator, particles *p) {
     double dt = integrator->dt;
-    double c2 = integrator->c2;
     int n_p = p->n_p;
     double *vel = p->vel;
     double *forces = p->fcs_tot;
     double *masses = p->mass;
+    int *types = p->types;
 
     long int ni;
     #pragma omp parallel for private(ni)
     for (int i = 0; i < n_p; i++) {
+        double c2 = integrator->c2_by_type == NULL
+            ? integrator->c2 : integrator->c2_by_type[types[i]];
         ni = i * 3;
         for (int j = 0; j < 3; j++) {
             vel[ni + j] += 0.5 * dt * c2 * forces[ni + j] / masses[i];
@@ -98,16 +101,18 @@ void v_block(integrator *integrator, particles *p) {
 void r_block(integrator *integrator, particles *p) {
     int n_p = p->n_p;
     double dt = integrator->dt;
-    double c2 = integrator->c2;
 
     double *pos = p->pos;
     double *vel = p->vel;
+    int *types = p->types;
     double L = p->L;
 
     long int ni;
     double app;
     #pragma omp parallel for private(ni, app)
     for (int i = 0; i < n_p; i++) {
+        double c2 = integrator->c2_by_type == NULL
+            ? integrator->c2 : integrator->c2_by_type[types[i]];
         ni = i * 3;
         for (int j = 0; j < 3; j++) {
             app = pos[ni + j] + c2 * dt * vel[ni + j];
@@ -147,8 +152,27 @@ void ovrvo_integrator_init_thermostat(integrator *integrator, double *params) {
     integrator->c2 = sqrt(2 / (gamma * integrator->dt) * tanh(0.5 * gamma * integrator->dt));
 }
 
+void ovrvo_integrator_init_type_thermostat(integrator *integrator, double T,
+                                           int n_typ, const double *gammas) {
+    integrator->T = T;
+    integrator->enabled = INTEGRATOR_ENABLED;
+    integrator->n_typ = n_typ;
+    integrator->c1_by_type = malloc(n_typ * sizeof(double));
+    integrator->c2_by_type = malloc(n_typ * sizeof(double));
+    for (int type = 0; type < n_typ; type++) {
+        double gamma_dt = gammas[type] * integrator->dt;
+        integrator->c1_by_type[type] = exp(-gamma_dt);
+        integrator->c2_by_type[type] = sqrt(2.0 / gamma_dt * tanh(0.5 * gamma_dt));
+    }
+}
+
 void ovrvo_integrator_stop_thermostat(integrator *integrator) {
     integrator->enabled = INTEGRATOR_DISABLED;
     integrator->c1 = 1.0;
     integrator->c2 = 1.0;
+    free(integrator->c1_by_type);
+    free(integrator->c2_by_type);
+    integrator->c1_by_type = NULL;
+    integrator->c2_by_type = NULL;
+    integrator->n_typ = 0;
 }

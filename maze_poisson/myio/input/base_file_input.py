@@ -1,5 +1,6 @@
 from dataclasses import asdict, dataclass
 from functools import wraps
+import math
 
 from ...constants import a0, kB, t_au
 from ...myio.loggers import logger
@@ -122,7 +123,7 @@ class MDVariables(BaseFileInput):
     tol: float = 1e-7  # Tolerance for convergence
 
     thermostat: bool = False  # Whether to use a thermostat
-    gamma: float = 1e-3  # Damping coefficient for the thermostat
+    gamma: float = 1e-3  # Langevin friction frequency in inverse atomic time
 
     rescale: bool = False  # Whether to rescale velocities
     invert_time: bool = False  # Whether to invert the time direction
@@ -143,6 +144,9 @@ class MDVariables(BaseFileInput):
         """Post-initialization to set defaults."""
         if self.dt_fs <= 0:
             raise ValueError("dt_fs must be a positive value.")
+        if (self.thermostat and self.integrator.upper() == 'OVRVO'
+                and (not math.isfinite(self.gamma) or self.gamma <= 0)):
+            raise ValueError("gamma must be finite and positive when the OVRVO thermostat is enabled.")
         if self.eps_map is None:
             self.eps_map = 'FIELD_DEPENDENT' if self.field_dependent_dielectric else 'TRADITIONAL'
         self.electrostatic_model = self.electrostatic_model.upper()
