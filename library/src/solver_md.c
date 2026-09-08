@@ -48,12 +48,12 @@ void solver_initialize() {
 
 void solver_initialize_grid(
     int n_grid, double L, double h, double tol, double eps, double eps_int,
-    grid_type grid_type, precond_type precond_type, int y_initial_guess,
+    grid_type grid_type, precond_type precond_type, int y_initial_guess, int phi_initial_guess,
     electrostatic_discretization_type discretization, int force_gradient_order
 ) {
     g_grid = grid_init(
         n_grid, L, h, tol, eps, eps_int, grid_type, precond_type,
-        y_initial_guess, discretization, force_gradient_order
+        y_initial_guess, phi_initial_guess, discretization, force_gradient_order
     );
 }
 
@@ -183,11 +183,13 @@ void solver_set_print_convergence(int val) {
 
 void solver_set_field(double *phi) {
     mpi_grid_distribute_buffer(g_grid->phi_n, phi, g_grid->n);
+    g_grid->phi_initialized = 1;
 }
 
 void solver_set_field_prev(double *phi) {
     if (g_grid->phi_p != NULL) {
         mpi_grid_distribute_buffer(g_grid->phi_p, phi, g_grid->n);
+        g_grid->phi_hist_len = 1;
     }
 }
 

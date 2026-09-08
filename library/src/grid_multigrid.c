@@ -10,6 +10,47 @@
 #include "mp_structs.h"
 #include "mpi_base.h"
 
+static const double PHI_POLY_COEF[MAZE_PHI_HIST_MAX + 1][MAZE_PHI_HIST_MAX + 1] = {
+    {1.0},
+    {2.0, -1.0},
+    {3.0, -3.0, 1.0},
+    {4.0, -6.0, 4.0, -1.0},
+    {5.0, -10.0, 10.0, -5.0, 1.0},
+};
+
+static void phi_push_current(grid *grid) {
+    double *new_phi_p = grid->phi_hist[MAZE_PHI_HIST_MAX - 2];
+    for (int i = MAZE_PHI_HIST_MAX - 2; i > 0; i--) {
+        grid->phi_hist[i] = grid->phi_hist[i - 1];
+    }
+    grid->phi_hist[0] = grid->phi_p;
+    grid->phi_p = new_phi_p;
+    vec_copy(grid->phi_n, grid->phi_p, grid->size);
+    if (grid->phi_hist_len < MAZE_PHI_HIST_MAX) grid->phi_hist_len++;
+}
+
+static void phi_build_guess(grid *grid) {
+    double *current = grid->phi_hist[MAZE_PHI_HIST_MAX - 1];
+    vec_copy(grid->phi_n, current, grid->size);
+
+    int order = grid->phi_extrap_order;
+    if (order > grid->phi_hist_len) order = grid->phi_hist_len;
+    vec_copy(current, grid->phi_n, grid->size);
+    dscal(grid->phi_n, PHI_POLY_COEF[order][0], grid->size);
+    if (order >= 1) daxpy(grid->phi_p, grid->phi_n, PHI_POLY_COEF[order][1], grid->size);
+    for (int j = 2; j <= order; j++) {
+        daxpy(grid->phi_hist[j - 2], grid->phi_n, PHI_POLY_COEF[order][j], grid->size);
+    }
+
+    double *oldest = grid->phi_hist[MAZE_PHI_HIST_MAX - 2];
+    for (int i = MAZE_PHI_HIST_MAX - 2; i > 0; i--) {
+        grid->phi_hist[i] = grid->phi_hist[i - 1];
+    }
+    grid->phi_hist[0] = grid->phi_p;
+    grid->phi_p = current;
+    grid->phi_hist[MAZE_PHI_HIST_MAX - 1] = oldest;
+    if (grid->phi_hist_len < MAZE_PHI_HIST_MAX) grid->phi_hist_len++;
+}
 
 void multigrid_grid_init(grid * grid) {
     int n_loc = grid->n_local;
@@ -27,6 +68,10 @@ void multigrid_grid_init(grid * grid) {
     grid->y = mpi_grid_allocate(n_loc, n);
     grid->phi_p = mpi_grid_allocate(n_loc, n);
     grid->phi_n = mpi_grid_allocate(n_loc, n);
+    for (int ph = 0; ph < MAZE_PHI_HIST_MAX; ph++) {
+        grid->phi_hist[ph] = mpi_grid_allocate(n_loc, n);
+        memset(grid->phi_hist[ph], 0, size * sizeof(double));
+    }
 
     memset(grid->phi_p, 0, size * sizeof(double));  // phi_p = 0
     memset(grid->phi_n, 0, size * sizeof(double));  // phi_n = 0
@@ -41,10 +86,13 @@ void multigrid_grid_cleanup(grid * grid) {
     mpi_grid_free(grid->y, grid->n);
     mpi_grid_free(grid->phi_p, grid->n);
     mpi_grid_free(grid->phi_n, grid->n);
+    for (int ph = 0; ph < MAZE_PHI_HIST_MAX; ph++) {
+        mpi_grid_free(grid->phi_hist[ph], grid->n);
+    }
 }
 
 void multigrid_grid_init_field(grid *grid) {
-    long int i;
+    double *rhs = mpi_grid_allocate(grid->n_local, grid->n);
 
     double constant = -4 * M_PI / grid->h;
     if ( ! grid->pb_enabled) {
@@ -52,33 +100,35 @@ void multigrid_grid_init_field(grid *grid) {
     }
 
     memset(grid->y, 0, grid->size * sizeof(double));  // y = 0
-    memcpy(grid->phi_p, grid->phi_n, grid->size * sizeof(double));  // phi_prev = phi_n
-    // phi_n = constant * q
-    memcpy(grid->phi_n, grid->q, grid->size * sizeof(double));
-    dscal(grid->phi_n, constant, grid->size);
+    if (grid->phi_initialized) phi_push_current(grid);
+    // Build the right-hand side separately so that phi_n remains the initial
+    // guess and is overwritten in place by the converged potential.
+    memcpy(rhs, grid->q, grid->size * sizeof(double));
+    dscal(rhs, constant, grid->size);
 
     if (grid->pb_enabled) {
         multigrid_solve_pb(
-            grid->tol, grid->phi_n, grid->y, grid->n_local, grid->n, grid->n_start,
+            grid->tol, rhs, grid->phi_n, grid->n_local, grid->n, grid->n_start,
             grid->eps_x, grid->eps_y, grid->eps_z, grid->k2
         );
     } else {
         multigrid_solve(
-            grid->tol, grid->phi_n, grid->y, grid->n_local, grid->n, grid->n_start
+            grid->tol, rhs, grid->phi_n, grid->n_local, grid->n, grid->n_start
         );
     }
+
+    grid->phi_initialized = 1;
+
+    mpi_grid_free(rhs, grid->n);
 }
 
 int multigrid_grid_update_field(grid *grid) {
     int res = -1;
-    long int n2 = grid->n * grid->n;
-    long int n3 = grid->n_local * n2;
-    
     double tol = grid->tol;
 
     double *tmp = mpi_grid_allocate(grid->n_local, grid->n);
 
-    verlet_update(grid->phi_n, grid->phi_p, n3);  // Update phi_n and phi_p with the Verlet algorithm
+    phi_build_guess(grid);
     // memset(grid->phi_n, 0, grid->size * sizeof(double));  // phi_n = 0 in case we need want multigrid to start without initial guess
 
     double constant = -4 * M_PI / grid->h;

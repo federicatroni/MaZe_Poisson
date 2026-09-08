@@ -83,6 +83,15 @@ y_initial_guess_map: Dict[str, int] = {
     'BASE': 0,
     'VERLET': 1,
     'ORDER2': 2,
+    'ZERO': 3,
+}
+
+phi_initial_guess_map: Dict[str, int] = {
+    'BASE': 0,
+    'VERLET': 1,
+    'ORDER2': 2,
+    'ORDER3': 3,
+    'ORDER4': 4,
 }
 
 pneigh_method_map: Dict[str, int] = {
@@ -343,6 +352,13 @@ class SolverMD(Logger, Clock):
         grid_id = method_grid_map[method]
         precond_id = precond_map[precond]
         y_initial_guess_id = y_initial_guess_map[y_initial_guess]
+        phi_initial_guess = (self.gset.phi_initial_guess or 'VERLET').upper()
+        if phi_initial_guess not in phi_initial_guess_map:
+            raise ValueError(
+                f"phi_initial_guess {phi_initial_guess} not recognized. "
+                f"Expected one of {sorted(phi_initial_guess_map)}."
+            )
+        phi_initial_guess_id = phi_initial_guess_map[phi_initial_guess]
         discretization = (self.gset.discretization or 'STANDARD').upper()
         if discretization not in electrostatic_discretization_map:
             raise ValueError(
@@ -361,7 +377,7 @@ class SolverMD(Logger, Clock):
             raise ValueError('force_gradient_order=4 currently requires MAZE-MULTIGRID.')
         capi.solver_initialize_grid(
             self.N, self.L, self.h, self.mdv.tol, self.gset.eps_s, self.gset.eps_int,
-            grid_id, precond_id, y_initial_guess_id, discretization_id,
+            grid_id, precond_id, y_initial_guess_id, phi_initial_guess_id, discretization_id,
             force_gradient_order
         )
         capi.solver_set_mg_krylov(1 if self.gset.mg_krylov else 0)

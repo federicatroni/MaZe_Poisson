@@ -18,15 +18,27 @@ static int pbc_grid_index(int idx, int n) {
 }
 
 static int validate_y_initial_guess(int y_initial_guess) {
-    if (y_initial_guess < 0 || y_initial_guess > MAZE_Y_HIST_MAX) {
+    if (y_initial_guess < 0 || y_initial_guess > MAZE_Y_GUESS_MAX) {
         mpi_fprintf(
             stderr,
             "Invalid y_initial_guess=%d (expected 0..%d). Using BASE.\n",
-            y_initial_guess, MAZE_Y_HIST_MAX
+            y_initial_guess, MAZE_Y_GUESS_MAX
         );
         return 0;
     }
     return y_initial_guess;
+}
+
+static int validate_phi_initial_guess(int phi_initial_guess) {
+    if (phi_initial_guess < 0 || phi_initial_guess > MAZE_PHI_HIST_MAX) {
+        mpi_fprintf(
+            stderr,
+            "Invalid phi_initial_guess=%d (expected 0..%d). Using VERLET.\n",
+            phi_initial_guess, MAZE_PHI_HIST_MAX
+        );
+        return 1;
+    }
+    return phi_initial_guess;
 }
 
 
@@ -57,7 +69,7 @@ char *get_stress_tensor_bc_type_str(int n) {
 
 grid * grid_init(
     int n, double L, double h, double tol, double eps, double eps_int,
-    grid_type grid_type, precond_type precond_type, int y_initial_guess,
+    grid_type grid_type, precond_type precond_type, int y_initial_guess, int phi_initial_guess,
     electrostatic_discretization_type discretization, int force_gradient_order
 ) {
     void   (*init_func)(grid *);
@@ -104,6 +116,12 @@ grid * grid_init(
     new->q = NULL;
     new->phi_p = NULL;
     new->phi_n = NULL;
+    for (int ph = 0; ph < MAZE_PHI_HIST_MAX; ph++) {
+        new->phi_hist[ph] = NULL;
+    }
+    new->phi_hist_len = 0;
+    new->phi_initialized = 0;
+    new->phi_extrap_order = validate_phi_initial_guess(phi_initial_guess);
     new->ig2 = NULL;
     new->region = NULL;
 

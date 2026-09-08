@@ -74,6 +74,12 @@ static void y_build_guess(double *y, double **y_hist, y_extrap_order y_extrap, i
     double coef[MAZE_Y_HIST_MAX + 1];
     int order;
     vec_copy(y, y_km1, size);
+
+    if (y_extrap == MAZE_Y_GUESS_ZERO) {
+        memset(y, 0, size * sizeof(double));
+        return;
+    }
+
     fill_extrapolation_coefficients(y_extrap, y_hist_len, coef, &order);
     extrap_predict(y, y_km1, y_hist, coef, order, size);
 }

@@ -4,6 +4,10 @@
 #define MAP_NOT_INITIALIZED -1
 // Max predictor order for the y-history warm start.
 #define MAZE_Y_HIST_MAX 2
+// Initial-guess modes above MAZE_Y_HIST_MAX are not extrapolation orders.
+#define MAZE_Y_GUESS_ZERO (MAZE_Y_HIST_MAX + 1)
+#define MAZE_Y_GUESS_MAX MAZE_Y_GUESS_ZERO
+#define MAZE_PHI_HIST_MAX 4
 #include "enums.h"
 
 #define EPS_MAP_TYPE_NUM 3
@@ -25,11 +29,12 @@ typedef struct neighbor neighbor;
 typedef struct particles particles;
 typedef struct integrator integrator;
 typedef int y_extrap_order;
+typedef int phi_extrap_order;
 
 // Struct function definitions
 grid * grid_init(
     int n, double L, double h, double tol, double eps, double eps_int,
-    grid_type type, precond_type precond_type, int y_initial_guess,
+    grid_type type, precond_type precond_type, int y_initial_guess, int phi_initial_guess,
     electrostatic_discretization_type discretization, int force_gradient_order
 );
 neighbor * neighbor_init();
@@ -184,6 +189,12 @@ struct grid {
     double *q;  // Charge density
     double *phi_p;  // Previous potential (could be NULL if not needed by the method)
     double *phi_n;  // Last potential
+    // For P3M: phi_p is the newest old field, phi_hist[0..2] are older
+    // fields, and phi_hist[3] is a scratch buffer.
+    double *phi_hist[MAZE_PHI_HIST_MAX];
+    int phi_hist_len;
+    int phi_initialized;
+    phi_extrap_order phi_extrap_order;
     double *ig2;  // Inverse of the laplacian
     unsigned int *region;  // Region type for each grid point (0=outside, 1=inside) defined in grid nodes
 

@@ -23,6 +23,7 @@ capi.register_function(
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
     ],
 )
 

@@ -81,12 +81,12 @@ void maze_multigrid_grid_init_field(grid *grid) {
 
     if (grid->pb_enabled) {
         multigrid_solve_pb(
-            grid->tol, tmp, grid->y, grid->n_local, grid->n, grid->n_start,
+            grid->tol, tmp, grid->phi_n, grid->n_local, grid->n, grid->n_start,
             grid->eps_x, grid->eps_y, grid->eps_z, grid->k2
         );
     } else {
         multigrid_solve(
-            grid->tol, tmp, grid->y, grid->n_local, grid->n, grid->n_start
+            grid->tol, tmp, grid->phi_n, grid->n_local, grid->n, grid->n_start
         );
     }
 

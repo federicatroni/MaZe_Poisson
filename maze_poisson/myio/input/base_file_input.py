@@ -91,7 +91,8 @@ class GridSetting(BaseFileInput):
 
     precond: str = 'NONE'
     smoother: str = 'LCG'
-    y_initial_guess: str = 'BASE'  # BASE | VERLET | ORDER2
+    y_initial_guess: str = 'BASE'  # BASE | VERLET | ORDER2 | ZERO
+    phi_initial_guess: str = 'VERLET'  # BASE | VERLET | ORDER2 | ORDER3 | ORDER4
     discretization: str = 'STANDARD'  # STANDARD | MEHRSTELLEN4
     force_gradient_order: int = 2  # 2 | 4
     # Use one multigrid V-cycle as a Krylov preconditioner. MEHRSTELLEN4
