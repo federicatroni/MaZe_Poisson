@@ -582,8 +582,11 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     R = ceil(solv_radii / h) + 2 (in cell units)
 
     Every node covered by at least one integration sphere is also assigned a
-    single owner: the particle whose centre is closest to the node, ties broken
-    by the lowest index. The owner map defines the control volume
+    single owner: the particle whose physical surface is closest to the node,
+    ties broken by the lowest index. Using distance-to-surface rather than
+    distance-to-centre is essential for particles with unequal radii: it keeps
+    the separating wall in the solvent gap instead of pushing it into the
+    larger particle's low-dielectric cavity. The owner map defines the control volume
     V_i = {nodes with st_owner == i} that `compute_stress_tensor_forces_pbc`
     integrates the Maxwell stress tensor on: it is the Voronoi cell of i
     restricted to the union of the integration spheres, so its boundary is
@@ -592,15 +595,15 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     The comparison uses the true node-centre distance, not the integer offsets,
     so that ties stay rare and do not depend on the lattice orientation.
      * ==================================================== */
-    double *owner_d2 = (double *)malloc((size_t)size * sizeof(double));
-    if (owner_d2 == NULL) {
+    double *owner_metric = (double *)malloc((size_t)size * sizeof(double));
+    if (owner_metric == NULL) {
         mpi_fprintf(stderr, "Error: Unable to allocate memory for the integration sphere owner map\n");
         exit(EXIT_FAILURE);
     }
     #pragma omp parallel for schedule(static)
     for (long idx = 0; idx < size; idx++) {
         owner[idx] = ST_OWNER_NONE;
-        owner_d2[idx] = 0.0;
+        owner_metric[idx] = 0.0;
     }
 
     for (int q = 0; q < p->n_p; q++) {
@@ -630,16 +633,17 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
                     dy -= L * round(dy / L);
                     dz -= L * round(dz / L);
                     double d2 = dx * dx + dy * dy + dz * dz;
+                    double surface_distance = sqrt(d2) - p->solv_radii[q];
 
-                    if (owner[idx] == ST_OWNER_NONE || d2 < owner_d2[idx]) {
+                    if (owner[idx] == ST_OWNER_NONE || surface_distance < owner_metric[idx]) {
                         owner[idx] = (unsigned int)q;
-                        owner_d2[idx] = d2;
+                        owner_metric[idx] = surface_distance;
                     }
                 }
             }
         }
     }
-    free(owner_d2);
+    free(owner_metric);
 
     // Exchange the final region map used by the stress tensor
     mpi_grid_exchange_bot_top_uint(region, n_local, n);
