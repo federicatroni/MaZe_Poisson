@@ -495,6 +495,23 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     unsigned int *region = g->region;
     unsigned int *owner  = g->st_owner;
 
+    /*
+     * STEP 2 below always evaluates the analytic edge eps fraction
+     * (sphere_edge_fraction) instead of only when the two endpoints of an
+     * edge have different region classification. That endpoint-based
+     * topology switch is a validated bug, not a design choice: it silently
+     * skips chords whose two endpoints are both "outside" but which still
+     * cross the sphere (the common case when h is comparable to the gap
+     * between two surfaces), producing a force discontinuity whenever a
+     * configuration crosses that classification boundary. The analytic fix
+     * was measured cost-free and force-identical to the old behaviour
+     * everywhere except those mishandled chords. Set MAZE_EPS_LEGACY_EDGES=1
+     * to opt back into the old buggy behaviour for regression comparisons.
+     */
+    const char *legacy_edges_env = getenv("MAZE_EPS_LEGACY_EDGES");
+    const int continuous_geometry =
+        !(legacy_edges_env != NULL && atoi(legacy_edges_env) != 0);
+
     /* ====================================================
      * STEP 1 - classify inside/outside using VdW spheres
      * ==================================================== */
@@ -544,6 +561,19 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         eps_x[idx] = eps_s;
         eps_y[idx] = eps_s;
         eps_z[idx] = eps_s;
+
+        if (continuous_geometry) {
+            eps_x[idx] = eps_mix_eval(
+                eps_m, eps_s, sphere_edge_fraction(p, x1, y1, z1, h, 0, L)
+            );
+            eps_y[idx] = eps_mix_eval(
+                eps_m, eps_s, sphere_edge_fraction(p, x1, y1, z1, h, 1, L)
+            );
+            eps_z[idx] = eps_mix_eval(
+                eps_m, eps_s, sphere_edge_fraction(p, x1, y1, z1, h, 2, L)
+            );
+            continue;
+        }
 
         /* Edge X */
         long idx_px = idx + (long)n * n;
