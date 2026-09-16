@@ -259,10 +259,18 @@ class SolverMD(Logger, Clock):
         polynomial_fit = None
         if method in ('WENDLANDC2_POLY', 'WENDLANDC4_POLY'):
             order = 2 if method == 'WENDLANDC2_POLY' else 4
+            poly_kwargs = {}
+            if self.gset.smoothing_poly_relative_tolerance is not None:
+                poly_kwargs['relative_tolerance'] = self.gset.smoothing_poly_relative_tolerance
+            if self.gset.smoothing_poly_max_abs_tolerance is not None:
+                poly_kwargs['max_abs_tolerance'] = self.gset.smoothing_poly_max_abs_tolerance
+            if self.gset.smoothing_poly_max_degree is not None:
+                poly_kwargs['max_degree'] = self.gset.smoothing_poly_max_degree
             polynomial_fit = generate_wendland_polynomial_fit(
                 n=self.N,
                 order=order,
                 sigma_grid=self.smoothing_sigma / self.h,
+                **poly_kwargs,
             )
             self.logger.info(
                 "Runtime Wendland C%d fit: degree=%d, relative L2=%.3e, max abs=%.3e",

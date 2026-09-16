@@ -290,6 +290,14 @@ void smooth_charges_wendland_nofft_init(grid *grid, int order) {
     }
 
     grid->smoothing_kernel = kernel;
+
+    if (getenv("MAZE_WENDLAND_DEBUG") != NULL) {
+        mpi_fprintf(stderr,
+            "[wendland-debug] init: n=%d n_local=%d sigma_grid=%.6f support=%d "
+            "disp=[%d,%d] halo=%d n_rows=%d weight_count=%ld max_threads=%d\n",
+            n, n_local, sigma, support, disp_min, disp_max, halo,
+            kernel->n_rows, weight_count, max_threads());
+    }
 }
 
 /*
@@ -366,7 +374,22 @@ static int smooth_charges_wendland_sparse(grid *grid, wendland_nofft_kernel *ker
         }
     }
     /* Random scatter writes stop winning well before a 50% fill fraction. */
-    if (nonzero_count * 5 >= output_size) return 0;
+    int sparse_ok = nonzero_count * 5 < output_size;
+    /* Benchmark-only override to measure both paths at the same (N, fill
+     * fraction) instead of only whichever the fixed threshold happens to
+     * pick; unset in normal use, so default behaviour is untouched. */
+    const char *force_path = getenv("MAZE_WENDLAND_FORCE_PATH");
+    if (force_path != NULL) {
+        if (strcmp(force_path, "dense") == 0) sparse_ok = 0;
+        else if (strcmp(force_path, "sparse") == 0) sparse_ok = 1;
+    }
+    if (getenv("MAZE_WENDLAND_DEBUG") != NULL) {
+        mpi_fprintf(stderr,
+            "[wendland-debug] call: nonzero_count=%ld output_size=%ld fill_frac=%.6f path=%s%s\n",
+            nonzero_count, output_size, (double)nonzero_count / (double)output_size,
+            sparse_ok ? "sparse" : "dense-fallback", force_path ? " (forced)" : "");
+    }
+    if (!sparse_ok) return 0;
 
     int n_threads = max_threads();
     if (n_threads > kernel->thread_capacity) n_threads = kernel->thread_capacity;

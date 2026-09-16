@@ -106,6 +106,12 @@ class GridSetting(BaseFileInput):
     smoothing_sigma: float = 0  # Gaussian width or Wendland support radius
     # Remove the leading-order charge-assignment window from the mesh interaction.
     smoothing_deconvolve_window: bool = False
+    # Override the default runtime Chebyshev fit tolerances/cap for
+    # WENDLANDC{2,4}_POLY (see generate_wendland_polynomial_fit); None keeps
+    # that function's defaults (1e-3 relative, 5e-4 max abs, degree cap 30).
+    smoothing_poly_relative_tolerance: float = None
+    smoothing_poly_max_abs_tolerance: float = None
+    smoothing_poly_max_degree: int = None
     # smoothing_steps: int = 0 # Number of steps for iterative smoothing methods
     # smoothing_diffusion_coeff: float = 0 # Diffusion coefficient for diffusion-based smoothing methods
 
