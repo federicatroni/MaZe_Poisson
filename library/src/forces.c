@@ -697,26 +697,111 @@ forces are.
 When the owner map was never filled (dielectric maps other than SPHERE it is
 ST_OWNER_NONE everywhere) the old purely geometric criterion is used instead.
 
-The permittivity on each face is taken from eps_x/eps_y/eps_z, which hold eps on
-the exact edge the flux is integrated on (eps_x[idx] is eps on the edge between
-idx and idx + x_hat, see `laplace.c`). Wall faces can cross the VdW cavity, where
-the constant eps_s would be wrong by a factor eps_s/eps_int.
+The stress tensor theorem holds only on a surface at constant eps. When two ions
+are closer than ~2 cells the wall crosses the dielectric discontinuity, and a face
+evaluated with the mixed eps of its grid edge and with phi read at nodes inside a
+cavity attributes the (huge, nearly cancelling) cavity-boundary force of one ion
+to the other, with a sign that depends on the grid phase. Every face is therefore
+evaluated on the SOLVENT side of the cavity surface:
+
+  - eps on the face is eps_s;
+  - the normal field follows from the continuity of D_n along the edge, which is
+    the same 1D series model that defines the edge eps (`wha` in grid_general.c):
+    E_n = (eps_edge / eps_s) * dphi / h;
+  - a reference to phi at a node inside a cavity (region == 1), seen from a solvent
+    node along a grid edge, is replaced by the potential at the point where that
+    edge crosses the sphere, at the reduced distance (1 - f) h, with f the inside
+    fraction of the edge recovered by inverting `wha` from the edge eps;
+  - the transverse field of the face is the 4-point average of the two edge
+    nodes, but a node inside a cavity does not contribute: only the solvent node's
+    (corrected) centred difference is used;
+  - if both nodes are inside two different cavities (gap < 1 cell) but the edge
+    still crosses a solvent lamina (f < 1), the face is evaluated in the lamina:
+    eps_s, E_n as above, E_t = 0 (there is no solvent node on the edge to read it
+    from, and the lamina is normal to the edge). If f = 1 (overlapping spheres,
+    or both nodes in the same sphere) the face keeps the plain grid formula.
+
+Faces at least one cell away from any cavity are unchanged: this only touches the
+faces whose 10-node stencil sees a cavity node.
 */
+typedef struct {
+    int n;
+    const double *phi;
+    const unsigned int *region;
+    const double *eps[3];
+    double eps_s, eps_m, h;
+} st_ss_ctx;
+
+static long st_ss_idx(const st_ss_ctx *c, const int q[3]) {
+    // q[0] is the local slab index (ghost slices at -1 and n_loc are valid), j
+    // and k wrap periodically.
+    return grid_index_3d(q[0], pbc_grid_index(q[1], c->n), pbc_grid_index(q[2], c->n), c->n);
+}
+
+static int st_ss_inside(const st_ss_ctx *c, const int q[3]) {
+    return c->region != NULL && c->region[st_ss_idx(c, q)] == 1u;
+}
+
+static double st_ss_edge_eps(const st_ss_ctx *c, const int m[3], int ax, int s) {
+    // Edge eps is stored on the node with the lower index along the edge.
+    int q[3] = {m[0], m[1], m[2]};
+    if (s < 0) q[ax] -= 1;
+    return c->eps[ax][st_ss_idx(c, q)];
+}
+
+static double st_edge_fraction(double eps_e, double eps_s, double eps_m) {
+    // Inverse of wha(eps_m, eps_s, f) = 1 / (f / eps_m + (1 - f) / eps_s).
+    if (eps_m == eps_s) return 0.0;
+    double f = (1.0 / eps_e - 1.0 / eps_s) / (1.0 / eps_m - 1.0 / eps_s);
+    if (f < 0.0) f = 0.0;
+    if (f > 1.0) f = 1.0;
+    return f;
+}
+
+/* Potential seen from solvent node m looking at its neighbour m + s e_ax, and
+ * the distance to it in units of h. If the neighbour is inside a cavity the
+ * pair (phi, distance) refers to the point where the edge crosses the sphere,
+ * with phi_s from the continuity of D_n along the edge. */
+static double st_ss_phi_ref(const st_ss_ctx *c, const int m[3], int ax, int s, double *dist) {
+    int q[3] = {m[0], m[1], m[2]};
+    q[ax] += s;
+    const double pc = c->phi[st_ss_idx(c, q)];
+    *dist = 1.0;
+    if (!st_ss_inside(c, q) || st_ss_inside(c, m)) return pc;
+    const double f = st_edge_fraction(st_ss_edge_eps(c, m, ax, s), c->eps_s, c->eps_m);
+    const double d = 1.0 - f;
+    const double pm = c->phi[st_ss_idx(c, m)];
+    *dist = d;
+    if (d < 1e-9) return pm;
+    return (c->eps_s * f * pm + c->eps_m * d * pc) / (c->eps_s * f + c->eps_m * d);
+}
+
+/* -dphi/dx_t at node m: plain centred difference, or the corrected one when
+ * `correct` is set and m is a solvent node. */
+static double st_ss_dphi_t(const st_ss_ctx *c, const int m[3], int t, int correct) {
+    int qp[3] = {m[0], m[1], m[2]}, qm[3] = {m[0], m[1], m[2]};
+    qp[t] += 1; qm[t] -= 1;
+    const double plain = -(c->phi[st_ss_idx(c, qp)] - c->phi[st_ss_idx(c, qm)]) / (2.0 * c->h);
+    if (!correct || st_ss_inside(c, m)) return plain;
+    double dp, dm;
+    const double pp = st_ss_phi_ref(c, m, t, +1, &dp);
+    const double pmn = st_ss_phi_ref(c, m, t, -1, &dm);
+    if (dp + dm < 1e-6) return plain;
+    return -(pp - pmn) / ((dp + dm) * c->h);
+}
+
 void compute_stress_tensor_forces_pbc(
-    int n, double eps_s, int n_p,
+    int n, double eps_s, double eps_int, int n_p,
     double L, double h, double *phi, const unsigned int *region,
     const unsigned int *st_owner,
     double *eps_x, double *eps_y, double *eps_z,
     double *pos, double *solv_radii, double *out_forces
 ) {
-    long int n2 = n * n;
     const double stress_prefactor = 1.0 / (4.0 * M_PI);
-    double h2 = h * h;
+    const double h2 = h * h;
 
-    double Ex, Ey, Ez;
-
-    int n_loc = get_n_loc();
-    int n_start = get_n_start();
+    const int n_loc = get_n_loc();
+    const int n_start = get_n_start();
     // Exchange the top and bottom slices. The dielectric edges are exchanged too
     // because their ghost state is not guaranteed at call time.
     mpi_grid_exchange_bot_top(phi, n_loc, n);
@@ -724,205 +809,94 @@ void compute_stress_tensor_forces_pbc(
     if (eps_y != NULL) mpi_grid_exchange_bot_top(eps_y, n_loc, n);
     if (eps_z != NULL) mpi_grid_exchange_bot_top(eps_z, n_loc, n);
 
-    #pragma omp parallel for private(Ex, Ey, Ez)
+    st_ss_ctx ctx;
+    ctx.n = n; ctx.phi = phi; ctx.region = region;
+    ctx.eps[0] = eps_x; ctx.eps[1] = eps_y; ctx.eps[2] = eps_z;
+    ctx.eps_s = eps_s; ctx.eps_m = eps_int; ctx.h = h;
+    const int has_eps = eps_x != NULL && eps_y != NULL && eps_z != NULL;
+
+    #pragma omp parallel for
     for (int p_idx = 0; p_idx < n_p; p_idx++) {
-        int ip = round(pos[p_idx * 3 + 0] / h);
-        int jp = round(pos[p_idx * 3 + 1] / h);
-        int kp = round(pos[p_idx * 3 + 2] / h);
-        int num_points_min = ceil(solv_radii[p_idx] / h) + 1;
-        int R2 = (num_points_min + 1) * (num_points_min + 1);
-
-        int i, j, k;
-        int i1, i2, j1, j2, k1, k2;
-        long int idx_a;
-        long int idx_b;
-
-        long int app1, app2;
+        const int ip = round(pos[p_idx * 3 + 0] / h);
+        const int jp = round(pos[p_idx * 3 + 1] / h);
+        const int kp = round(pos[p_idx * 3 + 2] / h);
+        const int num_points_min = ceil(solv_radii[p_idx] / h) + 1;
+        const int R2 = (num_points_min + 1) * (num_points_min + 1);
 
         for (int di = -num_points_min; di <= num_points_min; di++) {
-            i = pbc_grid_index(ip + di, n) - n_start; // Local index
-            i1 = i + 1;
-            i2 = i - 1;
-            if (i < 0 || i >= n_loc) {
-                continue;
-            }
-            app1 = di * di;
+            const int i = pbc_grid_index(ip + di, n) - n_start; // Local index
+            if (i < 0 || i >= n_loc) continue;
             for (int dj = -num_points_min; dj <= num_points_min; dj++) {
-                j  = pbc_grid_index(jp + dj, n);
-                j1 = pbc_grid_index(j + 1, n);
-                j2 = pbc_grid_index(j - 1, n);
-                app2 = app1 + dj * dj;
+                const int j = pbc_grid_index(jp + dj, n);
                 for (int dk = -num_points_min; dk <= num_points_min; dk++) {
                     // V_i is contained in the integration ball of i, so this only
                     // bounds the cost of the loop: it excludes no node of V_i.
-                    if (app2 + dk*dk >= R2) {
-                        continue;
-                    }
-
-                    k = pbc_grid_index(kp + dk, n);
-                    idx_a = grid_index_3d(i, j, k, n);
+                    if (di * di + dj * dj + dk * dk >= R2) continue;
+                    const int k = pbc_grid_index(kp + dk, n);
+                    const int a[3] = {i, j, k};
+                    const long idx_a = grid_index_3d(i, j, k, n);
 
                     // ST_OWNER_NONE means the map was never filled (dielectric
                     // maps other than SPHERE): fall back to the old behaviour.
-                    int owned = (st_owner != NULL && st_owner[idx_a] != ST_OWNER_NONE);
+                    const int owned = (st_owner != NULL && st_owner[idx_a] != ST_OWNER_NONE);
                     if (owned) {
-                        if (st_owner[idx_a] != (unsigned int)p_idx) {
-                            continue;
+                        if (st_owner[idx_a] != (unsigned int)p_idx) continue;
+                    } else {
+                        if (region != NULL && region[idx_a] == 1) continue;
+                    }
+                    const int d[3] = {di, dj, dk};
+
+                    // The six faces of node a: normal along axis `ax`, sign `s`.
+                    for (int ax = 0; ax < 3; ax++) {
+                        for (int s = -1; s <= 1; s += 2) {
+                            int b[3] = {a[0], a[1], a[2]};
+                            b[ax] += s;
+                            const long idx_b = st_ss_idx(&ctx, b);
+                            int keep;
+                            double eps_f;
+                            if (owned) {
+                                keep = (st_owner[idx_b] != (unsigned int)p_idx);
+                                eps_f = has_eps ? st_ss_edge_eps(&ctx, a, ax, s) : eps_s;
+                            } else {
+                                int dd[3] = {d[0], d[1], d[2]};
+                                dd[ax] += s;
+                                keep = (dd[0] * dd[0] + dd[1] * dd[1] + dd[2] * dd[2] >= R2) &&
+                                       (region == NULL || region[idx_b] == 0);
+                                eps_f = eps_s;
+                            }
+                            if (!keep) continue;
+
+                            const int in_a = st_ss_inside(&ctx, a);
+                            const int in_b = st_ss_inside(&ctx, b);
+                            // Both nodes inside two cavities: the face is evaluated
+                            // in the solvent lamina crossed by the edge, if any.
+                            const int lamina = in_a && in_b && owned && has_eps &&
+                                (1.0 - st_edge_fraction(eps_f, eps_s, eps_int)) > 1e-9;
+                            const int correct = has_eps && (!(in_a && in_b) || lamina);
+
+                            double E[3];
+                            E[ax] = -s * (phi[idx_b] - phi[idx_a]) / h;
+                            if (correct) {
+                                E[ax] *= eps_f / eps_s;   // D_n continuous along the edge
+                                eps_f = eps_s;
+                            }
+                            for (int t = 0; t < 3; t++) {
+                                if (t == ax) continue;
+                                if (lamina) { E[t] = 0.0; continue; }
+                                const double da = st_ss_dphi_t(&ctx, a, t, correct);
+                                const double db = st_ss_dphi_t(&ctx, b, t, correct);
+                                if (correct && (in_a != in_b)) {
+                                    E[t] = in_a ? db : da;
+                                } else {
+                                    E[t] = 0.5 * (da + db);
+                                }
+                            }
+                            const double e2 = E[0] * E[0] + E[1] * E[1] + E[2] * E[2];
+                            const double c0 = h2 * stress_prefactor * eps_f * s;
+                            for (int t = 0; t < 3; t++) {
+                                out_forces[p_idx * 3 + t] += c0 * (E[t] * E[ax] - (t == ax ? 0.5 * e2 : 0.0));
+                            }
                         }
-                    } else {
-                        if (region != NULL && region[idx_a] == 1) {
-                            continue;
-                        }
-                    }
-
-                    k1 = pbc_grid_index(k + 1, n);
-                    k2 = pbc_grid_index(k - 1, n);
-
-                    int keep;
-                    double eps_f;
-
-                    idx_b = grid_index_3d(i1, j, k, n);
-                    if (owned) {
-                        keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                        eps_f = (eps_x != NULL) ? eps_x[idx_a] : eps_s;
-                    } else {
-                        keep = ((di+1)*(di+1) + dj*dj + dk*dk >= R2) &&
-                               (region == NULL || region[idx_b] == 0);
-                        eps_f = eps_s;
-                    }
-                    if (keep) {
-                        Ex = -(phi[idx_b] - phi[idx_a]) / h;
-                        Ey = -(
-                            (phi[grid_index_3d(i, j1, k, n)] - phi[grid_index_3d(i, j2, k, n)]) +
-                            (phi[grid_index_3d(i1, j1, k, n)] - phi[grid_index_3d(i1, j2, k, n)])
-                        ) / (4.0 * h);
-                        Ez = -(
-                            (phi[grid_index_3d(i, j, k1, n)] - phi[grid_index_3d(i, j, k2, n)]) +
-                            (phi[grid_index_3d(i1, j, k1, n)] - phi[grid_index_3d(i1, j, k2, n)])
-                        ) / (4.0 * h);
-                        out_forces[p_idx * 3 + 0] += h2 * stress_prefactor * eps_f * (Ex*Ex - 0.5*(Ex*Ex + Ey*Ey + Ez*Ez));
-                        out_forces[p_idx * 3 + 1] += h2 * stress_prefactor * eps_f * Ex*Ey;
-                        out_forces[p_idx * 3 + 2] += h2 * stress_prefactor * eps_f * Ex*Ez;
-                    }
-
-                    idx_b = grid_index_3d(i2, j, k, n);
-                    if (owned) {
-                        keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                        eps_f = (eps_x != NULL) ? eps_x[idx_b] : eps_s;
-                    } else {
-                        keep = ((di-1)*(di-1) + dj*dj + dk*dk >= R2) &&
-                               (region == NULL || region[idx_b] == 0);
-                        eps_f = eps_s;
-                    }
-                    if (keep) {
-                        Ex = (phi[idx_b] - phi[idx_a]) / h;
-                        Ey = -(
-                            (phi[grid_index_3d(i, j1, k, n)] - phi[grid_index_3d(i, j2, k, n)]) +
-                            (phi[grid_index_3d(i2, j1, k, n)] - phi[grid_index_3d(i2, j2, k, n)])
-                        ) / (4.0 * h);
-                        Ez = -(
-                            (phi[grid_index_3d(i, j, k1, n)] - phi[grid_index_3d(i, j, k2, n)]) +
-                            (phi[grid_index_3d(i2, j, k1, n)] - phi[grid_index_3d(i2, j, k2, n)])
-                        ) / (4.0 * h);
-                        out_forces[p_idx * 3 + 0] += h2 * stress_prefactor * (-1.0) * eps_f * (Ex*Ex - 0.5*(Ex*Ex + Ey*Ey + Ez*Ez));
-                        out_forces[p_idx * 3 + 1] += h2 * stress_prefactor * (-1.0) * eps_f * Ex*Ey;
-                        out_forces[p_idx * 3 + 2] += h2 * stress_prefactor * (-1.0) * eps_f * Ex*Ez;
-                    }
-
-                    idx_b = grid_index_3d(i, j1, k, n);
-                    if (owned) {
-                        keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                        eps_f = (eps_y != NULL) ? eps_y[idx_a] : eps_s;
-                    } else {
-                        keep = (di*di + (dj+1)*(dj+1) + dk*dk >= R2) &&
-                               (region == NULL || region[idx_b] == 0);
-                        eps_f = eps_s;
-                    }
-                    if (keep) {
-                        Ex = -(
-                            (phi[grid_index_3d(i1, j, k, n)] - phi[grid_index_3d(i2, j, k, n)]) +
-                            (phi[grid_index_3d(i1, j1, k, n)] - phi[grid_index_3d(i2, j1, k, n)])
-                        ) / (4.0 * h);
-                        Ey = -(phi[idx_b] - phi[idx_a]) / h;
-                        Ez = -(
-                            (phi[grid_index_3d(i, j, k1, n)] - phi[grid_index_3d(i, j, k2, n)]) +
-                            (phi[grid_index_3d(i, j1, k1, n)] - phi[grid_index_3d(i, j1, k2, n)])
-                        ) / (4.0 * h);
-                        out_forces[p_idx * 3 + 0] += h2 * stress_prefactor * eps_f * Ey*Ex;
-                        out_forces[p_idx * 3 + 1] += h2 * stress_prefactor * eps_f * (Ey*Ey - 0.5*(Ex*Ex + Ey*Ey + Ez*Ez));
-                        out_forces[p_idx * 3 + 2] += h2 * stress_prefactor * eps_f * Ey*Ez;
-                    }
-
-                    idx_b = grid_index_3d(i, j2, k, n);
-                    if (owned) {
-                        keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                        eps_f = (eps_y != NULL) ? eps_y[idx_b] : eps_s;
-                    } else {
-                        keep = (di*di + (dj-1)*(dj-1) + dk*dk >= R2) &&
-                               (region == NULL || region[idx_b] == 0);
-                        eps_f = eps_s;
-                    }
-                    if (keep) {
-                        Ex = -(
-                            (phi[grid_index_3d(i1, j, k, n)] - phi[grid_index_3d(i2, j, k, n)]) +
-                            (phi[grid_index_3d(i1, j2, k, n)] - phi[grid_index_3d(i2, j2, k, n)])
-                        ) / (4.0 * h);
-                        Ey = (phi[idx_b] - phi[idx_a]) / h;
-                        Ez = -(
-                            (phi[grid_index_3d(i, j, k1, n)] - phi[grid_index_3d(i, j, k2, n)]) +
-                            (phi[grid_index_3d(i, j2, k1, n)] - phi[grid_index_3d(i, j2, k2, n)])
-                        ) / (4.0 * h);
-                        out_forces[p_idx * 3 + 0] += h2 * stress_prefactor * (-1.0) * eps_f * Ey*Ex;
-                        out_forces[p_idx * 3 + 1] += h2 * stress_prefactor * (-1.0) * eps_f * (Ey*Ey - 0.5*(Ex*Ex + Ey*Ey + Ez*Ez));
-                        out_forces[p_idx * 3 + 2] += h2 * stress_prefactor * (-1.0) * eps_f * Ey*Ez;
-                    }
-
-                    idx_b = grid_index_3d(i, j, k1, n);
-                    if (owned) {
-                        keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                        eps_f = (eps_z != NULL) ? eps_z[idx_a] : eps_s;
-                    } else {
-                        keep = (di*di + dj*dj + (dk+1)*(dk+1) >= R2) &&
-                               (region == NULL || region[idx_b] == 0);
-                        eps_f = eps_s;
-                    }
-                    if (keep) {
-                        Ex = -(
-                            (phi[grid_index_3d(i1, j, k, n)] - phi[grid_index_3d(i2, j, k, n)]) +
-                            (phi[grid_index_3d(i1, j, k1, n)] - phi[grid_index_3d(i2, j, k1, n)])
-                        ) / (4.0 * h);
-                        Ey = -(
-                            (phi[grid_index_3d(i, j1, k, n)] - phi[grid_index_3d(i, j2, k, n)]) +
-                            (phi[grid_index_3d(i, j1, k1, n)] - phi[grid_index_3d(i, j2, k1, n)])
-                        ) / (4.0 * h);
-                        Ez = -(phi[idx_b] - phi[idx_a]) / h;
-                        out_forces[p_idx * 3 + 0] += h2 * stress_prefactor * eps_f * Ez*Ex;
-                        out_forces[p_idx * 3 + 1] += h2 * stress_prefactor * eps_f * Ez*Ey;
-                        out_forces[p_idx * 3 + 2] += h2 * stress_prefactor * eps_f * (Ez*Ez - 0.5*(Ex*Ex + Ey*Ey + Ez*Ez));
-                    }
-
-                    idx_b = grid_index_3d(i, j, k2, n);
-                    if (owned) {
-                        keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                        eps_f = (eps_z != NULL) ? eps_z[idx_b] : eps_s;
-                    } else {
-                        keep = (di*di + dj*dj + (dk-1)*(dk-1) >= R2) &&
-                               (region == NULL || region[idx_b] == 0);
-                        eps_f = eps_s;
-                    }
-                    if (keep) {
-                        Ex = -(
-                            (phi[grid_index_3d(i1, j, k, n)] - phi[grid_index_3d(i2, j, k, n)]) +
-                            (phi[grid_index_3d(i1, j, k2, n)] - phi[grid_index_3d(i2, j, k2, n)])
-                        ) / (4.0 * h);
-                        Ey = -(
-                            (phi[grid_index_3d(i, j1, k, n)] - phi[grid_index_3d(i, j2, k, n)]) +
-                            (phi[grid_index_3d(i, j1, k2, n)] - phi[grid_index_3d(i, j2, k2, n)])
-                        ) / (4.0 * h);
-                        Ez = (phi[idx_b] - phi[idx_a]) / h;
-                        out_forces[p_idx * 3 + 0] += h2 * stress_prefactor * (-1.0) * eps_f * Ez*Ex;
-                        out_forces[p_idx * 3 + 1] += h2 * stress_prefactor * (-1.0) * eps_f * Ez*Ey;
-                        out_forces[p_idx * 3 + 2] += h2 * stress_prefactor * (-1.0) * eps_f * (Ez*Ez - 0.5*(Ex*Ex + Ey*Ey + Ez*Ez));
                     }
                 }
             }
@@ -933,7 +907,7 @@ void compute_stress_tensor_forces_pbc(
 }
 
 void compute_stress_tensor_forces(
-    int n, double eps_s, int n_p,
+    int n, double eps_s, double eps_int, int n_p,
     double L, double h, double *phi, const unsigned int *region,
     const unsigned int *st_owner,
     double *eps_x, double *eps_y, double *eps_z,
@@ -943,7 +917,7 @@ void compute_stress_tensor_forces(
     memset(out_forces, 0, n_p * 3 * sizeof(double));
 
     if (use_pbc) {
-        compute_stress_tensor_forces_pbc(n, eps_s, n_p, L, h, phi, region, st_owner,
+        compute_stress_tensor_forces_pbc(n, eps_s, eps_int, n_p, L, h, phi, region, st_owner,
                                          eps_x, eps_y, eps_z, pos, solv_radii, out_forces);
     } else {
         compute_stress_tensor_forces_dbc(n, eps_s, n_p, L, h, phi, region, pos, solv_radii, out_forces);
