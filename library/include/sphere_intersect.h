@@ -24,6 +24,25 @@ double sphere_edge_fraction(const particles *p,
     double x0, double y0, double z0,
     double h, int dir, double L);
 
+/* sphere_edge_fraction for dir = 0, 1, 2 at once (frac[3]); identical results, faster. */
+void sphere_edge_fractions3(const particles *p,
+    double x0, double y0, double z0,
+    double h, double L, double *frac);
+
+/* Whole grid line at once given its candidate spheres (see sphere_build_line_candidates):
+ * inside flags and the three edge fractions, equal to is_in_molecule_sphere / sphere_edge_fraction
+ * per node. Needs nc <= 256. */
+void sphere_line_eval_cand(const particles *p, double x, double y, double h, double L, int n,
+    const int *cand, int nc,
+    unsigned int *inside, double *frac_x, double *frac_y, double *frac_z);
+
+/* Per-line candidate spheres in CSR form, O(n_particles + n_lines). Returns -1 if some line has
+ * more than 256 candidates (use the per-node functions then). Free both arrays with free(). */
+int sphere_build_line_candidates(const particles *p, int n, int n_local, int n_start,
+    double h, double L, int **offsets_out, int **cand_out);
+
+
+
 /*
  * Find intersections between the edge and the surface of the union of spheres.
  * These are the points where the edge transitions between inside and outside.

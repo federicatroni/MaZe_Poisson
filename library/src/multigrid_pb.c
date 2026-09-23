@@ -3,10 +3,16 @@
 #include <string.h>
 #include <math.h>
 
+#include <omp.h>
 #include "linalg.h"
+#include "pb_stencil.h"
 #include "verlet.h"
 #include "mp_structs.h"
 #include "mpi_base.h"
+
+/* Max iterations of the CG that solves the first coarse level. Only a rough coarse-grid
+ * correction is needed: 10 gives the same number of V-cycles as 50 at a fraction of the cost. */
+#define MG_COARSE_CG_MAXIT 10
 
 #define JACOBI_OMEGA 0.66
 #define AXIS_X 0
@@ -95,6 +101,131 @@ static int cg_coarse_pb(double* b, double* x, int s1, int s2, int maxit, double 
     mpi_grid_free(Ap, s2);
 
     return k;  /* number of iterations executed */
+}
+
+
+/*
+ * Single-rank, multi-thread version of cg_coarse_pb: one persistent parallel region,
+ * fused loops and deterministic reductions (per-thread partial sums combined in thread order).
+ * Same algorithm, stopping rule and iteration count semantics as cg_coarse_pb.
+ */
+static int cg_coarse_pb_omp(double* b, double* x, int s1, int s2, int maxit, double rtol,
+                            double *eps_x, double *eps_y, double *eps_z, double *k2_screen, int nt)
+{
+    const long n  = (long)s1 * (long)s2 * (long)s2;
+    const long n2 = (long)s2 * (long)s2;
+
+    double *r  = mpi_grid_allocate(s1, s2);
+    double *p  = mpi_grid_allocate(s1, s2);
+    double *Ap = mpi_grid_allocate(s1, s2);
+
+    laplace_filter_pb(x, r, s1, s2, eps_x, eps_y, eps_z, k2_screen);   /* r <- A x */
+    daxpy(b, r, -1.0, n);                                             /* r <- r - b */
+    memcpy(p, r, n * sizeof(double));
+    dscal(p, -1.0, n);
+
+    const double r0_inf = norm_inf(r, n);
+    if (r0_inf == 0.0) {
+        mpi_grid_free(r, s2); mpi_grid_free(p, s2); mpi_grid_free(Ap, s2);
+        return 0;
+    }
+    double r_dot_r = ddot(r, r, n);
+
+    /* neighbour tables (periodic in j,k); eps halos are constant during the solve */
+    int jprev[s2], jnext[s2], kprev[s2], knext[s2];
+    for (int t = 0; t < s2; ++t) {
+        kprev[t] = (t - 1 + s2) % s2;
+        knext[t] = (t + 1) % s2;
+        jprev[t] = kprev[t] * s2;
+        jnext[t] = knext[t] * s2;
+    }
+    mpi_grid_exchange_bot_top(eps_x, s1, s2);
+    mpi_grid_exchange_bot_top(eps_y, s1, s2);
+    mpi_grid_exchange_bot_top(eps_z, s1, s2);
+    mpi_grid_exchange_bot_top(p, s1, s2);
+
+    double part_a[nt], part_b[nt], part_c[nt];   /* p.Ap ; r.r ; max|r| */
+    int k_done = 0;
+
+    #pragma omp parallel num_threads(nt)
+    {
+        const int tid = omp_get_thread_num();
+        double rdr = r_dot_r;
+
+        for (int k = 0; k < maxit; ++k) {
+            /* Ap = A p and partial p.Ap (rows are split evenly among the threads) */
+            double dsum = 0.0;
+            #pragma omp for schedule(static)
+            for (long row = 0; row < (long)s1 * s2; row++) {
+                const int i = (int)(row / s2);
+                const int j = (int)(row % s2);
+                const long i0 = (long)i * n2;
+                const long c = i0 + (long)j * s2;
+                pb_stencil_row(
+                    p, eps_x, eps_y, eps_z, k2_screen,
+                    c, c + n2, c - n2, i0 + jnext[j], i0 + jprev[j], s2, Ap + c
+                );
+                for (int kk = 0; kk < s2; kk++) dsum += p[c + kk] * Ap[c + kk];
+            }
+            part_a[tid] = dsum;
+            #pragma omp barrier
+
+            double denom = 0.0;
+            for (int t = 0; t < nt; t++) denom += part_a[t];
+            if (fabs(denom) < 1e-300) {
+                #pragma omp single
+                k_done = k;
+                break;
+            }
+            const double alpha = rdr / denom;
+
+            /* x += alpha p ; r += alpha Ap ; partial r.r and max|r| */
+            double rsum = 0.0, rmax = 0.0;
+            #pragma omp for schedule(static)
+            for (long t = 0; t < n; t++) {
+                x[t] += alpha * p[t];
+                double rv = r[t] + alpha * Ap[t];
+                r[t] = rv;
+                rsum += rv * rv;
+                double f = fabs(rv);
+                if (f > rmax) rmax = f;
+            }
+            part_b[tid] = rsum;
+            part_c[tid] = rmax;
+            #pragma omp barrier
+
+            double r_inf = 0.0, rn_rn = 0.0;
+            for (int t = 0; t < nt; t++) {
+                rn_rn += part_b[t];
+                if (part_c[t] > r_inf) r_inf = part_c[t];
+            }
+            if (r_inf <= rtol * r0_inf) {
+                #pragma omp single
+                k_done = k + 1;
+                break;
+            }
+            const double beta = rn_rn / rdr;
+            rdr = rn_rn;
+
+            /* p = -r + beta p, keeping the periodic ghost planes of p up to date */
+            #pragma omp for schedule(static)
+            for (int i = 0; i < s1; i++) {
+                const long i0 = (long)i * n2;
+                for (long t = i0; t < i0 + n2; t++) p[t] = beta * p[t] - r[t];
+                if (i == 0)      memcpy(p + (long)s1 * n2, p, n2 * sizeof(double));
+                if (i == s1 - 1) memcpy(p - n2, p + i0, n2 * sizeof(double));
+            }
+            if (k == maxit - 1) {
+                #pragma omp single
+                k_done = maxit;
+            }
+        }
+    }
+
+    mpi_grid_free(r,  s2);
+    mpi_grid_free(p,  s2);
+    mpi_grid_free(Ap, s2);
+    return k_done;
 }
 
 static int cg_coarse_pb_jacobi(double* b, double* x, int s1, int s2, int maxit, double rtol,
@@ -295,7 +426,15 @@ int v_cycle_pb(double *in, double *out, int s1, int s2, int n_start, int sm, int
             mpi_fprintf(stderr, "------------------------------------------------------------------------------------\n");
             exit(1);
         }
-        cg_coarse_pb(in, out, s1, s2, 50, 1e-5, eps_x, eps_y, eps_z, k2_screen); 
+        {
+            const int nt = omp_get_max_threads();
+            if (get_size() == 1 && nt > 1 && !omp_in_parallel()) {
+                cg_coarse_pb_omp(in, out, s1, s2, MG_COARSE_CG_MAXIT, 1e-5, eps_x, eps_y, eps_z, k2_screen, nt);
+            } else {
+                cg_coarse_pb(in, out, s1, s2, MG_COARSE_CG_MAXIT, 1e-5, eps_x, eps_y, eps_z, k2_screen);
+            }
+        }
+
         return depth;
     }
 
@@ -316,9 +455,7 @@ int v_cycle_pb(double *in, double *out, int s1, int s2, int n_start, int sm, int
     smooth_pb(in, out, s1, s2, sm_iter, eps_x, eps_y, eps_z, k2_screen);
 
     // 2) residual: r = in - A*out
-    laplace_filter_pb(out, r, s1, s2, eps_x, eps_y, eps_z, k2_screen);
-    dscal(r, -1.0, size);
-    daxpy(in, r, 1.0, size);
+    laplace_filter_pb_residual(out, in, r, NULL, s1, s2, eps_x, eps_y, eps_z, k2_screen);
 
     // 3) restrict to coarse
     restriction(r, rhs, s1, s2, n_start);
@@ -610,105 +747,181 @@ with a 7-point Laplacian stencil under periodic boundary conditions in j,k.
 @param eps_x, eps_y, eps_z: face-centered dielectric arrays
 @param k2_screen: cell-centered screening coefficient array
 */
+static void smooth_pb_rbgs_generic(
+    double *in, double *out,
+    int size1, int size2, double tol,
+    double *eps_x, double *eps_y, double *eps_z, double *k2_screen
+) {
+    const int iters = (int)tol;
+    if (iters <= 0) return;
+    const int n_start = get_n_start();
+    const long n2 = (long)size2 * (long)size2;
+    const double DIAG_EPS = 1e-14;
+    const int use_omp = ((long)size1 * n2 >= 40000);
+
+    int *jprev = (int*)malloc(size2*sizeof(int));
+    int *jnext = (int*)malloc(size2*sizeof(int));
+    for (int t = 0; t < size2; ++t) {
+        jprev[t] = ((t - 1 + size2) % size2) * size2;
+        jnext[t] = ((t + 1) % size2) * size2;
+    }
+
+    /* eps does not change during the smoothing: exchange its halos once */
+    mpi_grid_exchange_bot_top(eps_x, size1, size2);
+    mpi_grid_exchange_bot_top(eps_y, size1, size2);
+    mpi_grid_exchange_bot_top(eps_z, size1, size2);
+
+    for (int iter = 0; iter < iters; ++iter) {
+        for (int color = 0; color < 2; ++color) {   /* 0 = RED, 1 = BLACK */
+            mpi_grid_exchange_bot_top(out, size1, size2);
+
+            #pragma omp parallel for if(use_omp)
+            for (int i = 0; i < size1; ++i) {
+                const long i0 = (long)i * n2, i1 = i0 + n2, i2 = i0 - n2;
+                const int d = (n_start + i) % 2;
+                for (int j = 0; j < size2; ++j) {
+                    const long j0 = (long)j * size2, j1 = jnext[j], j2 = jprev[j];
+                    const long c = i0 + j0;
+                    const long xp = i1 + j0, xm = i2 + j0, yp = i0 + j1, ym = i0 + j2;
+                    const int k_first = (color == 0) ? (2 - ((d + (j % 2)) % 2)) % 2
+                                                     : (1 - ((d + (j % 2)) % 2)) % 2;
+                    for (int k = k_first; k < size2; k += 2) {
+                        const int kp = (k == size2 - 1) ? 0 : k + 1;
+                        const int km = (k == 0) ? size2 - 1 : k - 1;
+                        const long idx0 = c + k;
+                        const double ex_p = eps_x[idx0], ex_m = eps_x[xm + k];
+                        const double ey_p = eps_y[idx0], ey_m = eps_y[ym + k];
+                        const double ez_p = eps_z[idx0], ez_m = eps_z[c + km];
+
+                        double diag = ex_p + ex_m + ey_p + ey_m + ez_p + ez_m + k2_screen[idx0];
+                        if (diag < DIAG_EPS) diag = DIAG_EPS;
+
+                        const double rhs = ex_p * out[xp + k] +
+                                           ex_m * out[xm + k] +
+                                           ey_p * out[yp + k] +
+                                           ey_m * out[ym + k] +
+                                           ez_p * out[c + kp] +
+                                           ez_m * out[c + km] -
+                                           in[idx0];
+
+                        out[idx0] = rhs / diag;
+                    }
+                }
+            }
+        }
+    }
+
+    free(jprev); free(jnext);
+}
+
+/*
+ * Red or black update of one plane i (planes ip = i+1 and im = i-1 taken with periodic wrap).
+ * Same arithmetic as the sweeps of smooth_pb_rbgs_generic.
+ */
+static inline void rb_update_plane(
+    int color, int i, int ip, int im, int size2, int n_start,
+    const double *restrict in, double *restrict out,
+    const double *restrict eps_x, const double *restrict eps_y, const double *restrict eps_z,
+    const double *restrict k2_screen, const int *jprev, const int *jnext
+) {
+    const double DIAG_EPS = 1e-14;
+    const long n2 = (long)size2 * (long)size2;
+    const long i0 = (long)i * n2, i1 = (long)ip * n2, i2 = (long)im * n2;
+    const int d = (n_start + i) % 2;
+    for (int j = 0; j < size2; ++j) {
+        const long j0 = (long)j * size2, j1 = jnext[j], j2 = jprev[j];
+        const long c = i0 + j0;
+        const long xp = i1 + j0, xm = i2 + j0, yp = i0 + j1, ym = i0 + j2;
+        const int k_first = (color == 0) ? (2 - ((d + (j % 2)) % 2)) % 2
+                                         : (1 - ((d + (j % 2)) % 2)) % 2;
+        for (int k = k_first; k < size2; k += 2) {
+            const int kp = (k == size2 - 1) ? 0 : k + 1;
+            const int km = (k == 0) ? size2 - 1 : k - 1;
+            const long idx0 = c + k;
+            const double ex_p = eps_x[idx0], ex_m = eps_x[xm + k];
+            const double ey_p = eps_y[idx0], ey_m = eps_y[ym + k];
+            const double ez_p = eps_z[idx0], ez_m = eps_z[c + km];
+
+            double diag = ex_p + ex_m + ey_p + ey_m + ez_p + ez_m + k2_screen[idx0];
+            if (diag < DIAG_EPS) diag = DIAG_EPS;
+
+            const double rhs = ex_p * out[xp + k] +
+                               ex_m * out[xm + k] +
+                               ey_p * out[yp + k] +
+                               ey_m * out[ym + k] +
+                               ez_p * out[c + kp] +
+                               ez_m * out[c + km] -
+                               in[idx0];
+
+            out[idx0] = rhs / diag;
+        }
+    }
+}
+
+/*
+ * Single-rank RBGS with the red and black sweeps of each iteration fused in one pass over the
+ * planes. Every thread owns a slab of planes [a, b): it updates red(i) and, one plane behind,
+ * black(i-1); the black planes on the two ends of the slab, which need the red planes of the
+ * neighbouring slabs, are done after a barrier. Red(i) reads the black cells of planes i-1, i, i+1
+ * and each of those is still un-updated when red(i) runs, so the result is identical to
+ * "all red, then all black" (bit for bit), but the arrays are streamed once instead of twice.
+ */
 void smooth_pb_rbgs(
     double *in, double *out,
     int size1, int size2, double tol,
     double *eps_x, double *eps_y, double *eps_z, double *k2_screen
 ) {
-    int iters, n_start, iter, t, i, j, k, d, k1, k2;
-    long n2, i0, i1, i2, j0, j1, j2, idx0, idx_x, idx_y, idx_z;
-    int *jprev, *jnext, *kprev, *knext;
-    double DIAG_EPS, ex_p, ex_m, ey_p, ey_m, ez_p, ez_m, diag, rhs;
-
-    iters = (int)tol; if (iters <= 0) return;
-    n_start = get_n_start();
-    n2 = (long)size2 * (long)size2;
-    DIAG_EPS = 1e-14;
-
-    jprev = (int*)malloc(size2*sizeof(int));
-    jnext = (int*)malloc(size2*sizeof(int));
-    kprev = (int*)malloc(size2*sizeof(int));
-    knext = (int*)malloc(size2*sizeof(int));
-
-    for (t = 0; t < size2; ++t) {
-        kprev[t] = (t - 1 + size2) % size2;
-        knext[t] = (t + 1) % size2;
-        jprev[t] = kprev[t] * size2;
-        jnext[t] = knext[t] * size2;
+    const int iters = (int)tol;
+    if (iters <= 0) return;
+    if (get_size() != 1 || size1 < 2) {
+        smooth_pb_rbgs_generic(in, out, size1, size2, tol, eps_x, eps_y, eps_z, k2_screen);
+        return;
     }
 
-    for (iter = 0; iter < iters; ++iter) {
-        mpi_grid_exchange_bot_top(eps_x, size1, size2);
-        mpi_grid_exchange_bot_top(eps_y, size1, size2);
-        mpi_grid_exchange_bot_top(eps_z, size1, size2);
+    const int n_start = get_n_start();
+    int nt = ((long)size1 * size2 * size2 >= 40000) ? omp_get_max_threads() : 1;
+    if (nt > size1) nt = size1;
+    if (omp_in_parallel()) nt = 1;
 
-        /* RED */
-        mpi_grid_exchange_bot_top(out, size1, size2);
-        #pragma omp parallel for private(i,j,k,d,i0,i1,i2,j0,j1,j2,k1,k2,idx0,idx_x,idx_y,idx_z,ex_p,ex_m,ey_p,ey_m,ez_p,ez_m,diag,rhs)
-        for (i = 0; i < size1; ++i) {
-            i0 = (long)i * n2; i1 = i0 + n2; i2 = i0 - n2; d = (n_start + i) % 2;
-            for (j = 0; j < size2; ++j) {
-                j0 = (long)j * size2; j1 = jnext[j]; j2 = jprev[j];
-                k = (2 - ((d + (j % 2)) % 2)) % 2;
-                for (; k < size2; k += 2) {
-                    k1 = knext[k]; k2 = kprev[k];
-                    idx0 = i0 + j0 + k; idx_x = i2 + j0 + k; idx_y = i0 + j2 + k; idx_z = i0 + j0 + k2;
+    int *jprev = (int*)malloc(size2*sizeof(int));
+    int *jnext = (int*)malloc(size2*sizeof(int));
+    for (int t = 0; t < size2; ++t) {
+        jprev[t] = ((t - 1 + size2) % size2) * size2;
+        jnext[t] = ((t + 1) % size2) * size2;
+    }
 
-                    ex_p = eps_x[idx0]; ex_m = eps_x[idx_x];
-                    ey_p = eps_y[idx0]; ey_m = eps_y[idx_y];
-                    ez_p = eps_z[idx0]; ez_m = eps_z[idx_z];
+    #pragma omp parallel num_threads(nt)
+    {
+        const int tid = omp_get_thread_num();
+        const int base = size1 / nt, rem = size1 % nt;
+        const int a = tid * base + (tid < rem ? tid : rem);
+        const int b = a + base + (tid < rem ? 1 : 0);
 
-                    diag = ex_p + ex_m + ey_p + ey_m + ez_p + ez_m + k2_screen[idx0];
-                    if (diag < DIAG_EPS) diag = DIAG_EPS;
-
-                    rhs = ex_p * out[i1 + j0 + k] +
-                          ex_m * out[idx_x]       +
-                          ey_p * out[i0 + j1 + k] +
-                          ey_m * out[idx_y]       +
-                          ez_p * out[i0 + j0 + k1]+
-                          ez_m * out[idx_z]       -
-                          in[idx0];
-
-                    /* ——— SCRITTURA INTERMEDIA COME PRIMA ——— */
-                    out[idx0] = rhs / diag;  /* mantiene il comportamento “di prima” */
+        for (int iter = 0; iter < iters; ++iter) {
+            for (int i = a; i < b; ++i) {
+                const int ip = (i + 1 == size1) ? 0 : i + 1;
+                const int im = (i == 0) ? size1 - 1 : i - 1;
+                rb_update_plane(0, i, ip, im, size2, n_start, in, out, eps_x, eps_y, eps_z, k2_screen, jprev, jnext);
+                const int j = i - 1;
+                if (j >= a + 1) {
+                    const int jp = j + 1, jm = j - 1;   /* interior of the slab: no wrap needed */
+                    rb_update_plane(1, j, jp, jm, size2, n_start, in, out, eps_x, eps_y, eps_z, k2_screen, jprev, jnext);
                 }
             }
-        }
-
-        /* BLACK */
-        mpi_grid_exchange_bot_top(out, size1, size2);
-        #pragma omp parallel for private(i,j,k,d,i0,i1,i2,j0,j1,j2,k1,k2,idx0,idx_x,idx_y,idx_z,ex_p,ex_m,ey_p,ey_m,ez_p,ez_m,diag,rhs)
-        for (i = 0; i < size1; ++i) {
-            i0 = (long)i * n2; i1 = i0 + n2; i2 = i0 - n2; d = (n_start + i) % 2;
-            for (j = 0; j < size2; ++j) {
-                j0 = (long)j * size2; j1 = jnext[j]; j2 = jprev[j];
-                k = (1 - ((d + (j % 2)) % 2)) % 2;
-                for (; k < size2; k += 2) {
-                    k1 = knext[k]; k2 = kprev[k];
-                    idx0 = i0 + j0 + k; idx_x = i2 + j0 + k; idx_y = i0 + j2 + k; idx_z = i0 + j0 + k2;
-
-                    ex_p = eps_x[idx0]; ex_m = eps_x[idx_x];
-                    ey_p = eps_y[idx0]; ey_m = eps_y[idx_y];
-                    ez_p = eps_z[idx0]; ez_m = eps_z[idx_z];
-
-                    diag = ex_p + ex_m + ey_p + ey_m + ez_p + ez_m + k2_screen[idx0];
-                    if (diag < DIAG_EPS) diag = DIAG_EPS;
-
-                    rhs = ex_p * out[i1 + j0 + k] +
-                          ex_m * out[idx_x]       +
-                          ey_p * out[i0 + j1 + k] +
-                          ey_m * out[idx_y]       +
-                          ez_p * out[i0 + j0 + k1]+
-                          ez_m * out[idx_z]       -
-                          in[idx0];
-
-                    out[idx0] = rhs / diag;  /* idem */
-                }
+            #pragma omp barrier
+            if (b > a) {
+                const int lo = a, hi = b - 1;
+                rb_update_plane(1, lo, (lo + 1 == size1) ? 0 : lo + 1, (lo == 0) ? size1 - 1 : lo - 1,
+                                size2, n_start, in, out, eps_x, eps_y, eps_z, k2_screen, jprev, jnext);
+                if (hi != lo)
+                    rb_update_plane(1, hi, (hi + 1 == size1) ? 0 : hi + 1, (hi == 0) ? size1 - 1 : hi - 1,
+                                    size2, n_start, in, out, eps_x, eps_y, eps_z, k2_screen, jprev, jnext);
             }
+            #pragma omp barrier
         }
     }
 
-    free(jprev); free(jnext); free(kprev); free(knext);
+    free(jprev); free(jnext);
 }
 
 int multigrid_pb_apply(double *in, double *out, int s1, int s2, int n_start1, int sm, double *eps_x, double *eps_y, double *eps_z, double *k2_screen) {

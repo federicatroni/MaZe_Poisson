@@ -212,19 +212,20 @@ static int solve_pb_multigrid_correction(
             eps_x, eps_y, eps_z, k2_screen
         );
 
-        laplace_filter_pb(
-            y, residual, size1, size2,
+        double res_norm;
+        laplace_filter_pb_residual(
+            y, rhs, NULL, &res_norm, size1, size2,
             eps_x, eps_y, eps_z, k2_screen
         );
-        daxpy(rhs, residual, -1.0, n3);
 
-        if (norm_inf(residual, n3) <= tol) {
+        if (res_norm <= tol) {
             return iteration;
         }
     }
 
     return -1;
 }
+
 
 /*
 Apply the MaZe Verlet update and PB constraint.  When zero_mode is true, a
@@ -375,9 +376,7 @@ EXTERN_C int verlet_pb_multigrid_eps_field(
         while(iter_conv < MG_ITER_LIMIT_PB) { 
             multigrid_pb_apply(tmp2, y, size1, size2, get_n_start(), MG_SOLVE_SM_PB, eps_x, eps_y, eps_z, k2_screen); //solve A_pb . y = sigma_p
 
-            laplace_filter_pb(y, tmp, size1, size2, eps_x, eps_y, eps_z, k2_screen);
-            daxpy(tmp2, tmp, -1., n3);  // res = A . y - sigma_p
-            app = norm_inf(tmp, n3);   // Compute norm_inf of residual
+            laplace_filter_pb_residual(y, tmp2, NULL, &app, size1, size2, eps_x, eps_y, eps_z, k2_screen);  // app = norm_inf(A . y - sigma_p)
             iter_conv++;
             
             // printf("\ny = %e \t iter=%d \t res=%e\n", norm_inf(y, n3), iter_conv,app);

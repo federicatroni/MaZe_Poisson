@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "sphere_intersect.h"
@@ -71,35 +72,9 @@ int is_in_molecule_sphere(const particles *p, double x, double y, double z, doub
 /* Maximum interval capacity, one per atom. Increase if N_atoms > 128. */
 #define MAX_SPHERE_ATOMS 256
 
-double sphere_edge_fraction(const particles *p,
-    double x0, double y0, double z0,
-    double h, int dir, double L)
+/* Total length of the union of n >= 2 intervals [lo,hi] (sorted in place). */
+static double merge_interval_fraction(double *lo, double *hi, int n_intervals)
 {
-    double lo[MAX_SPHERE_ATOMS], hi[MAX_SPHERE_ATOMS];
-    int n_intervals = 0;
-
-    for (int ip = 0; ip < p->n_p && n_intervals < MAX_SPHERE_ATOMS; ip++) {
-        double dx = min_image_1d(x0 - p->pos[ip * 3 + 0], L);
-        double dy = min_image_1d(y0 - p->pos[ip * 3 + 1], L);
-        double dz = min_image_1d(z0 - p->pos[ip * 3 + 2], L);
-        double r  = p->solv_radii[ip];
-
-        double t1, t2;
-        if (!solve_sphere_edge(dx, dy, dz, r, h, dir, &t1, &t2)) continue;
-
-        /* Clamp to [0,1]. */
-        if (t1 < 0.0) t1 = 0.0;
-        if (t2 > 1.0) t2 = 1.0;
-        if (t1 >= t2) continue;
-
-        lo[n_intervals] = t1;
-        hi[n_intervals] = t2;
-        n_intervals++;
-    }
-
-    if (n_intervals == 0) return 0.0;
-    if (n_intervals == 1) return hi[0] - lo[0];
-
     /* Sort by lo using insertion sort; n is small. */
     for (int i = 1; i < n_intervals; i++) {
         double lv = lo[i], hv = hi[i];
@@ -130,6 +105,219 @@ double sphere_edge_fraction(const particles *p,
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
     return frac;
+}
+
+double sphere_edge_fraction(const particles *p,
+    double x0, double y0, double z0,
+    double h, int dir, double L)
+{
+    double lo[MAX_SPHERE_ATOMS], hi[MAX_SPHERE_ATOMS];
+    int n_intervals = 0;
+
+    for (int ip = 0; ip < p->n_p && n_intervals < MAX_SPHERE_ATOMS; ip++) {
+        double dx = min_image_1d(x0 - p->pos[ip * 3 + 0], L);
+        double dy = min_image_1d(y0 - p->pos[ip * 3 + 1], L);
+        double dz = min_image_1d(z0 - p->pos[ip * 3 + 2], L);
+        double r  = p->solv_radii[ip];
+
+        double t1, t2;
+        if (!solve_sphere_edge(dx, dy, dz, r, h, dir, &t1, &t2)) continue;
+
+        /* Clamp to [0,1]. */
+        if (t1 < 0.0) t1 = 0.0;
+        if (t2 > 1.0) t2 = 1.0;
+        if (t1 >= t2) continue;
+
+        lo[n_intervals] = t1;
+        hi[n_intervals] = t2;
+        n_intervals++;
+    }
+
+    if (n_intervals == 0) return 0.0;
+    if (n_intervals == 1) return hi[0] - lo[0];
+    return merge_interval_fraction(lo, hi, n_intervals);
+}
+
+/*
+ * Same as calling sphere_edge_fraction for dir = 0, 1, 2, but shares the minimum
+ * image work and skips spheres that provably cannot cross an edge (margin 1e-6
+ * on the rejection tests, so the surviving intervals are exactly the same).
+ */
+/* Add the clamped chord of sphere (radius r, centre offset d) on the three edges from one node. */
+static inline void edge_add_sphere(const double *d, double r, double h,
+    double lo[3][MAX_SPHERE_ATOMS], double hi[3][MAX_SPHERE_ATOMS], int *n_int)
+{
+    const double margin = 1.000001;
+    const double r2m = r * r * margin;
+    const double rm  = r * margin;
+    const double rhm = (r + h) * margin;
+
+    for (int dir = 0; dir < 3; dir++) {
+        double along = d[dir];
+        double perp2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2] - along*along;
+        if (perp2 > r2m || along > rm || along < -rhm) continue;
+
+        double t1, t2;
+        if (!solve_sphere_edge(d[0], d[1], d[2], r, h, dir, &t1, &t2)) continue;
+        if (t1 < 0.0) t1 = 0.0;
+        if (t2 > 1.0) t2 = 1.0;
+        if (t1 >= t2) continue;
+        lo[dir][n_int[dir]] = t1;
+        hi[dir][n_int[dir]] = t2;
+        n_int[dir]++;
+    }
+}
+
+static inline void edge_finish(double lo[3][MAX_SPHERE_ATOMS], double hi[3][MAX_SPHERE_ATOMS],
+    const int *n_int, double *frac)
+{
+    for (int dir = 0; dir < 3; dir++) {
+        if (n_int[dir] == 0)      frac[dir] = 0.0;
+        else if (n_int[dir] == 1) frac[dir] = hi[dir][0] - lo[dir][0];
+        else                      frac[dir] = merge_interval_fraction(lo[dir], hi[dir], n_int[dir]);
+    }
+}
+
+void sphere_edge_fractions3(const particles *p,
+    double x0, double y0, double z0,
+    double h, double L, double *frac)
+{
+    double lo[3][MAX_SPHERE_ATOMS], hi[3][MAX_SPHERE_ATOMS];
+    int n_int[3] = {0, 0, 0};
+
+    for (int ip = 0; ip < p->n_p && ip < MAX_SPHERE_ATOMS; ip++) {
+        double d[3];
+        d[0] = min_image_1d(x0 - p->pos[ip * 3 + 0], L);
+        d[1] = min_image_1d(y0 - p->pos[ip * 3 + 1], L);
+        d[2] = min_image_1d(z0 - p->pos[ip * 3 + 2], L);
+        edge_add_sphere(d, p->solv_radii[ip], h, lo, hi, n_int);
+    }
+    edge_finish(lo, hi, n_int, frac);
+}
+
+/*
+ * Evaluate a whole grid line (fixed x, y; z = k*h for k = 0..n-1) given the list of spheres that
+ * can reach it (cand[0..nc), ascending particle index, see sphere_build_line_candidates):
+ * inside[k] = is_in_molecule_sphere(x, y, z) and frac[dir][k] = sphere_edge_fraction(dir).
+ * Spheres left out of the list cannot touch the line (bounding test with margin 1e-6), and the
+ * others are processed in the original order, so the results equal the per-node functions.
+ * Requires nc <= MAX_SPHERE_ATOMS.
+ */
+void sphere_line_eval_cand(const particles *p, double x, double y, double h, double L, int n,
+    const int *cand, int nc,
+    unsigned int *inside, double *frac_x, double *frac_y, double *frac_z)
+{
+    double cdx[MAX_SPHERE_ATOMS], cdy[MAX_SPHERE_ATOMS];
+    for (int c = 0; c < nc; c++) {
+        cdx[c] = min_image_1d(x - p->pos[cand[c] * 3 + 0], L);
+        cdy[c] = min_image_1d(y - p->pos[cand[c] * 3 + 1], L);
+    }
+
+    for (int k = 0; k < n; k++) {
+        const double z = k * h;
+        double lo[3][MAX_SPHERE_ATOMS], hi[3][MAX_SPHERE_ATOMS];
+        int n_int[3] = {0, 0, 0};
+        unsigned int in = 0u;
+        for (int c = 0; c < nc; c++) {
+            const int ip = cand[c];
+            double d[3];
+            d[0] = cdx[c];
+            d[1] = cdy[c];
+            d[2] = min_image_1d(z - p->pos[ip * 3 + 2], L);
+            const double r = p->solv_radii[ip];
+            if (d[0]*d[0] + d[1]*d[1] + d[2]*d[2] <= r*r) in = 1u;
+            edge_add_sphere(d, r, h, lo, hi, n_int);
+        }
+        double fr[3];
+        edge_finish(lo, hi, n_int, fr);
+        inside[k] = in;
+        frac_x[k] = fr[0];
+        frac_y[k] = fr[1];
+        frac_z[k] = fr[2];
+    }
+}
+
+/*
+ * Build, in O(n_particles + n_lines), the list of spheres that can reach each grid line
+ * (line id = i_local * n + j, x = (i_local + n_start) * h, y = j * h), in CSR form:
+ * the candidates of line l are cand[offsets[l] .. offsets[l+1]), in ascending particle index.
+ * Each particle only visits the lines inside its bounding box (plus one line of slack), and
+ * the same bounding test as before (margin 1e-6, computed with the same min_image values)
+ * decides the membership. Returns 0 on success, -1 if a line has more than MAX_SPHERE_ATOMS
+ * candidates (the caller must then use the per-node functions). offsets has n_local*n + 1
+ * entries; both arrays are malloc'd and must be freed by the caller.
+ */
+int sphere_build_line_candidates(const particles *p, int n, int n_local, int n_start,
+    double h, double L, int **offsets_out, int **cand_out)
+{
+    const double margin = 1.000001;
+    const long n_lines = (long)n_local * n;
+    int *offsets = (int *)calloc((size_t)n_lines + 1, sizeof(int));
+    int *fillpos = (int *)malloc((size_t)(n_lines + 1) * sizeof(int));
+    int *gi = (int *)malloc((size_t)n * sizeof(int));
+    int *gj = (int *)malloc((size_t)n * sizeof(int));
+    double *dxv = (double *)malloc((size_t)n * sizeof(double));
+    double *dyv = (double *)malloc((size_t)n * sizeof(double));
+    int *cand = NULL;
+    int status = 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            long total = 0;
+            for (long l = 0; l < n_lines; l++) {
+                int cnt = offsets[l];
+                offsets[l] = (int)total;
+                total += cnt;
+            }
+            offsets[n_lines] = (int)total;
+            cand = (int *)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
+            for (long l = 0; l <= n_lines; l++) fillpos[l] = offsets[l];
+        }
+
+        for (int ip = 0; ip < p->n_p; ip++) {
+            const double r = p->solv_radii[ip];
+            const double px = p->pos[ip * 3 + 0], py = p->pos[ip * 3 + 1];
+            const int span = (int)ceil((r + h) * margin / h) + 1;
+
+            int ni, nj;
+            if (2 * span + 1 >= n) {           /* box wider than the grid: visit everything */
+                ni = nj = n;
+                for (int t = 0; t < n; t++) { gi[t] = t; gj[t] = t; }
+            } else {
+                const int iq = (int)floor(px / h), jq = (int)floor(py / h);
+                ni = nj = 2 * span + 1;
+                for (int t = 0; t < ni; t++) {
+                    gi[t] = (((iq - span + t) % n) + n) % n;
+                    gj[t] = (((jq - span + t) % n) + n) % n;
+                }
+            }
+            /* per-plane / per-row displacements, computed exactly as the per-node code does */
+            for (int a = 0; a < ni; a++) dxv[a] = min_image_1d(gi[a] * h - px, L);
+            for (int b = 0; b < nj; b++) dyv[b] = min_image_1d(gj[b] * h - py, L);
+
+            for (int a = 0; a < ni; a++) {
+                const int il = gi[a] - n_start;
+                if (il < 0 || il >= n_local) continue;
+                const double dx = dxv[a];
+                if (dx > r * margin || dx < -(r + h) * margin) continue;
+                for (int b = 0; b < nj; b++) {
+                    const double dy = dyv[b];
+                    if (dy > r * margin || dy < -(r + h) * margin) continue;
+                    const long l = (long)il * n + gj[b];
+                    if (pass == 0) offsets[l]++;
+                    else cand[fillpos[l]++] = ip;
+                }
+            }
+        }
+    }
+
+    for (long l = 0; l < n_lines; l++)
+        if (offsets[l + 1] - offsets[l] > MAX_SPHERE_ATOMS) { status = -1; break; }
+
+    free(fillpos); free(gi); free(gj); free(dxv); free(dyv);
+    *offsets_out = offsets;
+    *cand_out = cand;
+    return status;
 }
 
 /* ------------------------------------------------------------------ */

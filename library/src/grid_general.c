@@ -516,6 +516,39 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
      * STEP 1 - classify inside/outside using VdW spheres
      * ==================================================== */
 
+    int *line_off = NULL, *line_cand = NULL;
+    const int have_lines = continuous_geometry &&
+        sphere_build_line_candidates(p, n, n_local, n_start, h, L, &line_off, &line_cand) == 0;
+
+    if (have_lines) {
+        /* Fused STEP 1 + STEP 2 on grid lines: same values, only the spheres that can reach a
+         * line are evaluated (linear in grid points and particles) */
+        const long n_lines = (long)n_local * n;
+
+        #pragma omp parallel for schedule(static)
+        for (long line = 0; line < n_lines; line++) {
+            const int i = (int)(line / n);
+            const int j = (int)(line % n);
+            const double x = (i + n_start) * h;
+            const double y = j * h;
+            const long base = line * n;
+            double fx[n], fy[n], fz[n];
+
+            sphere_line_eval_cand(p, x, y, h, L, n,
+                line_cand + line_off[line], line_off[line + 1] - line_off[line],
+                region + base, fx, fy, fz);
+
+            for (int k = 0; k < n; k++) {
+                const long idx = base + k;
+                k2[idx] = region[idx] ? 0.0 : kbar2;
+                eps_x[idx] = eps_mix_eval(eps_m, eps_s, fx[k]);
+                eps_y[idx] = eps_mix_eval(eps_m, eps_s, fy[k]);
+                eps_z[idx] = eps_mix_eval(eps_m, eps_s, fz[k]);
+            }
+        }
+
+        mpi_grid_exchange_bot_top_uint(region, n_local, n);
+    } else {
     long long region_inside  = 0;
     long long region_outside = 0;
 
@@ -563,15 +596,11 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         eps_z[idx] = eps_s;
 
         if (continuous_geometry) {
-            eps_x[idx] = eps_mix_eval(
-                eps_m, eps_s, sphere_edge_fraction(p, x1, y1, z1, h, 0, L)
-            );
-            eps_y[idx] = eps_mix_eval(
-                eps_m, eps_s, sphere_edge_fraction(p, x1, y1, z1, h, 1, L)
-            );
-            eps_z[idx] = eps_mix_eval(
-                eps_m, eps_s, sphere_edge_fraction(p, x1, y1, z1, h, 2, L)
-            );
+            double fr[3];
+            sphere_edge_fractions3(p, x1, y1, z1, h, L, fr);
+            eps_x[idx] = eps_mix_eval(eps_m, eps_s, fr[0]);
+            eps_y[idx] = eps_mix_eval(eps_m, eps_s, fr[1]);
+            eps_z[idx] = eps_mix_eval(eps_m, eps_s, fr[2]);
             continue;
         }
 
@@ -602,7 +631,10 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
             eps_z[idx] = eps_m;
         }
     }
+    }
 
+    free(line_off);
+    free(line_cand);
 
     /* ====================================================
      * STEP 3 — mark enlarged sphere (region = 2) and assign an owner

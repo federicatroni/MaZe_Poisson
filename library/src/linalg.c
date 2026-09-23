@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include "mpi_base.h"
 
+/* Below this many elements a parallel region costs more than it saves (coarse multigrid levels) */
+#define OMP_MIN_N 40000
+
 #ifdef __cplusplus
 #define EXTERN_C extern "C"                                                           
 #else
@@ -104,7 +107,7 @@ Copy a vector from in to out
 */
 EXTERN_C void vec_copy(double *in, double *out, long int n) {
     long int i;
-    #pragma omp parallel for
+    #pragma omp parallel for if(n >= OMP_MIN_N)
     for (i = 0; i < n; i++) {
         out[i] = in[i];
     }
@@ -118,7 +121,7 @@ Scale a vector by a constant x = alpha * x
 */
 EXTERN_C void dscal(double *x, double alpha, long int n) {
     long int i;
-    #pragma omp parallel for
+    #pragma omp parallel for if(n >= OMP_MIN_N)
     for (i = 0; i < n; i++) {
         x[i] *= alpha;
     }
@@ -134,6 +137,7 @@ Compute the dot product of two vectors
 EXTERN_C double ddot(double *u, double *v, long int n) {
     long int i;
     double result = 0.0;
+    // Kept parallel: a serial sum changes the reduction order and hence the CG iteration counts
     #pragma omp parallel for reduction(+:result)
     for (i = 0; i < n; i++) {
         result += u[i] * v[i];
@@ -152,7 +156,7 @@ and store the result in the second vector
 */
 EXTERN_C void daxpy(double *v, double *u, double alpha, long int n) {
     long int i;
-    #pragma omp parallel for
+    #pragma omp parallel for if(n >= OMP_MIN_N)
     for (i = 0; i < n; i++) {
         u[i] += alpha * v[i];
     }
@@ -201,7 +205,7 @@ EXTERN_C double norm_inf(double *u, long int n) {
     double max_val = 0.0;
     double a; 
 
-    #pragma omp parallel for private(a) reduction(max:max_val)
+    #pragma omp parallel for if(n >= OMP_MIN_N) private(a) reduction(max:max_val)
     for (i = 0; i < n; i++) {
         a = fabs(u[i]);
         if (a > max_val) max_val = a;
