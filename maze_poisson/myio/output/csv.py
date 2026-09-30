@@ -9,6 +9,8 @@ from .base_out import BaseOutputFile, OutputFiles
 
 
 class CSVOutputFile(BaseOutputFile):
+    extension = 'csv'
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.init_headers()

@@ -126,11 +126,17 @@ class OutputFiles:
                 cls = ptr[name]
             except KeyError:
                 raise ValueError(f"Output format '{self.fmt}' does not support '{name}' output")
-            _path = os.path.join(self.base_path, f'{name}.{self.fmt}')
+            # A format may reuse a writer of another format (e.g. restart files stay csv in 'bin')
+            ext = getattr(cls, 'extension', None) or self.fmt
+            _path = os.path.join(self.base_path, f'{name}.{ext}')
+            kwargs = {}
+            if getattr(cls, 'takes_precision', False):
+                kwargs['precision'] = self.oset.bin_precision
             setattr(self, name, cls(
                 path = _path,
                 enabled = getattr(self.oset, f'print_{name}'),
-                overwrite=True
+                overwrite=True,
+                **kwargs
             ))
 
     @property

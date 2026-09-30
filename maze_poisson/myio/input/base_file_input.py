@@ -60,7 +60,8 @@ class OutputSettings(BaseFileInput):
     print_eps_map: bool = False
 
     path: str = 'Outputs/'
-    format: str = 'csv'
+    format: str = 'csv'  # 'csv' or 'bin' (compact binary, read it with maze_poisson.myio.output.read_maze_bin)
+    bin_precision: str = 'float32'  # 'float32' or 'float64': floats of solute, forces_pb and eps_map in 'bin' format
 
     stride: int = 50
     flushstride: int = 5

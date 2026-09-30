@@ -1,3 +1,4 @@
+# TODO(bin format): reads output files with pd.read_csv, adapt to also read .bin (see maze_poisson/myio/output/binary.py)
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
