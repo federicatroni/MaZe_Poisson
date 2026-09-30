@@ -112,8 +112,7 @@ EXTERN_C int verlet_poisson_multigrid(
     constant = (4 * M_PI) / h;
     laplace_filter(phi, tmp2, size1, size2);
     daxpy(q, tmp2, constant, n3);  // sigma_p = A . phi + 4 * pi * rho / eps
-    // memset(y, 0, n3 * sizeof(double));
-    // printf("\nprima y = %e\n", norm_inf(y, n3));
+    if (!mg_keep_y) memset(y, 0, n3 * sizeof(double));  // start from y = 0 (MAZE_MG_KEEP_Y=1: previous y)
     
     // Questo pezzo non e' usato se vedi app e tmp2 vengono riscritti prima di essere letti
     // Serve solo se abiliti il printf sotto
@@ -255,6 +254,9 @@ EXTERN_C int verlet_pb_multigrid_with_retry(
     const double constant = (4 * M_PI) / h;
     laplace_filter_pb(phi, tmp2, size1, size2, eps_x, eps_y, eps_z, k2_screen);
     daxpy(q, tmp2, constant, n3);  // sigma_p = A_pb . phi + 4 * pi * q / h
+
+    /* Start from y = 0: the previous y is a worse guess (its residual is larger than that of zero) */
+    memset(y, 0, n3 * sizeof(double));
 
     int res = solve_pb_multigrid_correction(
         tol, tmp2, y, tmp, size1, size2,

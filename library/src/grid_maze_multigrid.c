@@ -9,6 +9,8 @@
 #include "verlet.h"
 #include "mp_structs.h"
 #include "mpi_base.h"
+#include "multigrid.h"
+#include "multigrid_pb.h"
 
 #define PB_GAUGE_FIX_STRIDE 1000L
 
@@ -73,6 +75,8 @@ void maze_multigrid_grid_init(grid * grid) {
     long int n2 = n * n;
 
     maze_multigrid_grid_init_mpi(grid);
+    mg_pb_env_init();
+    mg_env_init();
 
     long int size = grid->n_local * n2;
     grid->size = size;

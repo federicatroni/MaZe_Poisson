@@ -14,6 +14,15 @@
  * correction is needed: 10 gives the same number of V-cycles as 50 at a fraction of the cost. */
 #define MG_COARSE_CG_MAXIT 10
 
+double mg_pb_corr_scale = MG_PB_CORR_SCALE;
+int mg_pb_maxdepth = MG_PB_MAXDEPTH;
+
+void mg_pb_env_init(void) {
+    const char *a = getenv("MAZE_MG_CORR_SCALE"), *b = getenv("MAZE_MG_MAXDEPTH");
+    if (a != NULL && atof(a) > 0.0) mg_pb_corr_scale = atof(a);
+    if (b != NULL && atoi(b) > 0) mg_pb_maxdepth = atoi(b);
+}
+
 #define JACOBI_OMEGA 0.66
 #define AXIS_X 0
 #define AXIS_Y 1
@@ -418,7 +427,7 @@ int v_cycle_pb(double *in, double *out, int s1, int s2, int n_start, int sm, int
     const int sm_iter = (int)ceil(sm * pow(MG_RECURSION_FACTOR, depth));
 
     // base case
-    if ( (s1_nxt < fmax(16, get_size())) || (depth >= 1) ) {
+    if ( (s1_nxt < fmax(16, get_size())) || (depth >= mg_pb_maxdepth) ) {
         if (depth == 0) {
             mpi_fprintf(stderr, "------------------------------------------------------------------------------------\n");
             mpi_fprintf(stderr, "Multigrid: requires atleast one level of recursion (s1 >= %d)\n", fmax(4, get_size()));
@@ -475,7 +484,7 @@ int v_cycle_pb(double *in, double *out, int s1, int s2, int n_start, int sm, int
     prolong(eps, r, s1_nxt, s2_nxt, s1, s2, n_start);
 
     // 6) apply correction
-    daxpy(r, out, 1.0, size);
+    daxpy(r, out, mg_pb_corr_scale, size);
 
     // 7) post-smoothing
     smooth_pb(in, out, s1, s2, sm_iter, eps_x, eps_y, eps_z, k2_screen);
