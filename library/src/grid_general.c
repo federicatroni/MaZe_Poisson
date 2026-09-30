@@ -744,7 +744,7 @@ double grid_get_energy_elec(grid *g){
     #pragma omp parallel for reduction(+:energy)
     for (long int i = 0; i < g->size; i++) {
         // Calculate the change in energy due to the Poisson-Boltzmann potential
-        energy += 0.5 * g->phi_n[i];
+        energy += 0.5 * g->q[i] * g->phi_n[i];
     }
 
     allreduce_sum(&energy, 1);
