@@ -81,6 +81,7 @@ particles * particles_init(int n, int n_p, int n_typ, double L, double h, int ca
     p->fcs_tot = (double *)calloc(n_p * 3, sizeof(double));
     p->mass = (double *)malloc(n_p * sizeof(double));
     p->charges = (double *)malloc(n_p * sizeof(double));
+    p->fixed = (int *)calloc(n_p, sizeof(int));
 
     p->pb_enabled = 0;  // Poisson-Boltzmann not enabled by default
     p->fcs_db = NULL;
@@ -148,6 +149,7 @@ void particles_free(particles *p) {
     free(p->fcs_tot);
     free(p->mass);
     free(p->charges);
+    free(p->fixed);
     free(p->neighbors);
     if (p->tf_params != NULL) {
         free(p->tf_params);
@@ -925,8 +927,25 @@ void particles_compute_forces_tot(particles *p) {
 } 
 
 
+void particles_set_fixed(particles *p, const int *fixed) {
+    for (int i = 0; i < p->n_p; i++) {
+        p->fixed[i] = fixed[i] ? 1 : 0;
+        if (p->fixed[i]) {
+            p->vel[3 * i] = p->vel[3 * i + 1] = p->vel[3 * i + 2] = 0.0;
+        }
+    }
+}
+
+// Frozen particles carry no kinetic energy and are not counted in the degrees of freedom
 double particles_get_temperature(particles *p) {
-    return 2 * particles_get_kinetic_energy(p) / (3 * p->n_p * kB);
+    int n_free = 0;
+    for (int i = 0; i < p->n_p; i++) {
+        n_free += !p->fixed[i];
+    }
+    if (n_free == 0) {
+        return 0.0;
+    }
+    return 2 * particles_get_kinetic_energy(p) / (3 * n_free * kB);
 }
 
 double particles_get_kinetic_energy(particles *p) {
@@ -970,16 +989,20 @@ void particles_get_momentum(particles *p, double *out) {
 
 void particles_rescale_velocities(particles *p) {
     double *init_vel = (double *)calloc(p->n_typ * 3, sizeof(double));
+    int n_free = 0;
 
     for (int i = 0; i < p->n_p; i++) {
+        if (p->fixed[i]) continue;
+        n_free++;
         for (int j = 0; j < 3; j++) {
             init_vel[p->types[i] * 3 + j] += p->vel[i * 3 + j];
         }
     }
 
     for (int i = 0; i < p->n_p; i++) {
+        if (p->fixed[i]) continue;
         for (int j = 0; j < 3; j++) {
-            p->vel[i * 3 + j] -= 2 * init_vel[p->types[i] * 3 + j] / p->n_p;
+            p->vel[i * 3 + j] -= 2 * init_vel[p->types[i] * 3 + j] / n_free;
         }
     }
 

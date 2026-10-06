@@ -62,6 +62,7 @@ void o_block(integrator *integrator, particles *p) {
         // mean = 0.0 and variance = 1.0.
         #pragma omp parallel for private(ni, var1, var2)
         for (int i = 0; i < n_p; i++) {
+            if (p->fixed[i]) continue;
             double c1 = integrator->c1_by_type == NULL
                 ? integrator->c1 : integrator->c1_by_type[types[i]];
             double c1_sqrt = sqrt(c1);
@@ -89,6 +90,7 @@ void v_block(integrator *integrator, particles *p) {
     long int ni;
     #pragma omp parallel for private(ni)
     for (int i = 0; i < n_p; i++) {
+        if (p->fixed[i]) continue;
         double c2 = integrator->c2_by_type == NULL
             ? integrator->c2 : integrator->c2_by_type[types[i]];
         ni = i * 3;
@@ -111,6 +113,7 @@ void r_block(integrator *integrator, particles *p) {
     double app;
     #pragma omp parallel for private(ni, app)
     for (int i = 0; i < n_p; i++) {
+        if (p->fixed[i]) continue;
         double c2 = integrator->c2_by_type == NULL
             ? integrator->c2 : integrator->c2_by_type[types[i]];
         ni = i * 3;

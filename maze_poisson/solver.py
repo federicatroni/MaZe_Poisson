@@ -397,6 +397,13 @@ class SolverMD(Logger):
         kBT = self.mdv.kBT
 
         df = pd.read_csv(start_file)
+        # The optional per-particle flag must also survive a restart.
+        flags = df['fixed'] if 'fixed' in df else pd.Series(0, index=df.index)
+        if not flags.isin([0, 1, False, True]).all():
+            raise ValueError("The fixed column must contain only 0/1 or true/false.")
+        self.fixed = np.ascontiguousarray(flags, dtype=np.int32)
+        if self.fixed.any() and self.mdv.rescale:
+            raise ValueError("Use rescale=false when particles are fixed.")
         types = np.ascontiguousarray(particles.loc[df['type'], 'enum'].values, dtype=np.int32)
         pos = np.ascontiguousarray(df[['x', 'y', 'z']].values / cst.a0, dtype=np.float64)
         charges = np.ascontiguousarray(particles.loc[df['type'], 'charge'].values, dtype=np.float64)
@@ -435,6 +442,10 @@ class SolverMD(Logger):
             types, pos, vel, mass, charges,
             pot_params
         )
+        if self.fixed.any():
+            if capi.solver_set_fixed.func is None:
+                raise RuntimeError("Rebuild the C library to enable fixed particles.")
+            capi.solver_set_fixed(self.fixed)
 
         needs_radii = (
             self.mdv.poisson_boltzmann

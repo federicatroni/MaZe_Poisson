@@ -39,3 +39,9 @@ cmake -S . -B build \
 cmake --build build -j8
 cmake --install build
 ```
+
+## Fixed particles (frozen probe)
+
+An optional `fixed` column (0/1) in the `input_file` freezes a particle: the integrators (OVRVO, Verlet) never
+move it and keep its velocity at zero, while its forces are still computed. The temperature counts only the mobile
+particles, the restart file keeps the flag, and `rescale` must be `false`. Rebuild the C library after updating.

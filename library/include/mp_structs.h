@@ -132,6 +132,7 @@ double particles_compute_forces_pb(particles *p, grid *grid);
 void particles_compute_forces_tot(particles *p);
 
 double particles_get_temperature(particles *p);
+void particles_set_fixed(particles *p, const int *fixed);
 double particles_get_kinetic_energy(particles *p);
 void particles_get_momentum(particles *p, double *out);
 void particles_rescale_velocities(particles *p);
@@ -232,6 +233,7 @@ struct particles {
     double *fcs_tot;  // Particle total forces (n_p x 3)
     double *mass;  // Particle masses (n_p)
     double *charges;  // Particle charges (n_p)
+    int *fixed;  // 1 = frozen particle (never moved by the integrators, zero velocity), 0 = free (n_p)
     long int *neighbors;  // Particle neighbors (n_p x 8 x 3)
 
     double r_cut;

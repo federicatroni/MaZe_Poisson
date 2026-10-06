@@ -66,6 +66,10 @@ void solver_initialize_particles(
     g_particles->init_potential(g_particles, pot_type, pot_params);
 }
 
+void solver_set_fixed(int *fixed) {
+    particles_set_fixed(g_particles, fixed);
+}
+
 void solver_initialize_particles_pois_boltz(double gamma_np, double beta_np, double *solv_radii) {
     particles_pb_init(g_particles, gamma_np, beta_np, solv_radii);
 }

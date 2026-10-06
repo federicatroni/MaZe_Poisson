@@ -27,6 +27,7 @@ void verlet_integrator_part1(integrator *integrator, particles *p) {
         current_T = particles_get_temperature(p);
         double scale = sqrt(target_T / current_T);
         for (int i = 0; i < p->n_p; i++) {
+            if (p->fixed[i]) continue;
             ni = i * 3;
             vel[ni]     *= scale;
             vel[ni + 1] *= scale;
@@ -36,6 +37,7 @@ void verlet_integrator_part1(integrator *integrator, particles *p) {
 
     #pragma omp parallel for private(ni,nj,app)
     for (int i = 0; i < p->n_p; i++) {
+        if (p->fixed[i]) continue;
         ni = i * 3;
         for (int j = 0; j < 3; j++) {
             nj = ni + j;
@@ -62,6 +64,7 @@ void verlet_integrator_part2(integrator *integrator, particles *p) {
 
     #pragma omp parallel for private(ni,nj)
     for (int i = 0; i < p->n_p; i++) {
+        if (p->fixed[i]) continue;
         ni = i * 3;
         for (int j = 0; j < 3; j++) {
             nj = ni + j;
