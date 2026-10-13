@@ -8,6 +8,7 @@
 #include "mpi_base.h"
 #include "linalg.h"
 #include "mp_structs.h"
+#include "multigrid_semi.h"
 
 #define EPS_FIELD_TOL 1e-1
 #define EPS_FIELD_MAX_ITER 500
@@ -205,11 +206,57 @@ static int solve_pb_multigrid_correction(
 ) {
     const long int n3 = (long int)size1 * size2 * size2;
 
+    /* [slit_dsl patch] MAZE_MG_SEMI=1: replace the standard V-cycle by the semi-coarsening V-cycle
+     * (multigrid_semi.c). Same fine operator, rhs and stopping test; single MPI rank only. */
+    static int semi = -1;
+    if (semi < 0) { const char *e = getenv("MAZE_MG_SEMI"); semi = (e != NULL && atoi(e) != 0 && get_size() == 1); }
+    if (semi && semi_mg_setup(size1, size2, eps_x, eps_y, eps_z, k2_screen) == 0) semi = 0;  /* grid not coarsenable: standard V-cycle from now on */
+#define MG_CYCLE(F, U) do { if (semi) semi_mg_vcycle((F), (U), size1, size2); \
+        else multigrid_pb_apply((F), (U), size1, size2, get_n_start(), MG_SOLVE_SM_PB, eps_x, eps_y, eps_z, k2_screen); } while (0)
+    int ret_all = -1;
+
+    /* [slit_dsl patch] MAZE_MG_KRYLOV=1: flexible CG (FCG(1), Notay 2000) preconditioned by one
+     * V-cycle (zero initial guess). Same operator, same rhs, same stopping test (max|A y - rhs| <= tol)
+     * as the stationary V-cycle iteration below: only the number of V-cycles changes.
+     * Returns the number of V-cycles, or -1 if not converged. */
+    static int krylov = -1;
+    if (krylov < 0) { const char *e = getenv("MAZE_MG_KRYLOV"); krylov = (e != NULL && atoi(e) != 0); }
+    if (krylov) {
+        double *r = mpi_grid_allocate(size1, size2);
+        double *z = mpi_grid_allocate(size1, size2);
+        double *p = mpi_grid_allocate(size1, size2);
+        double *q = mpi_grid_allocate(size1, size2);
+        double res_norm;
+        int ret = -1;
+        /* r = rhs - A y */
+        laplace_filter_pb_residual(y, rhs, r, &res_norm, size1, size2, eps_x, eps_y, eps_z, k2_screen);
+        if (res_norm <= tol) ret = 0;
+        else {
+            memset(z, 0, n3 * sizeof(double));
+            MG_CYCLE(r, z);
+            vec_copy(z, p, n3);
+            for (int iteration = 1; iteration <= MG_ITER_LIMIT_PB; iteration++) {
+                laplace_filter_pb(p, q, size1, size2, eps_x, eps_y, eps_z, k2_screen);   /* q = A p */
+                const double pq = ddot(p, q, n3);
+                const double alpha = ddot(z, r, n3) / pq;
+                daxpy(p, y, alpha, n3);    /* y += alpha p */
+                daxpy(q, r, -alpha, n3);   /* r -= alpha q */
+                res_norm = norm_inf(r, n3);
+                if (res_norm <= tol) { ret = iteration; break; }
+                memset(z, 0, n3 * sizeof(double));
+                MG_CYCLE(r, z);
+                const double beta = -ddot(z, q, n3) / pq;   /* FCG(1): A-orthogonalise against previous p */
+                dscal(p, beta, n3);
+                daxpy(z, p, 1.0, n3);      /* p = z + beta p */
+            }
+        }
+        mpi_grid_free(r, size2); mpi_grid_free(z, size2); mpi_grid_free(p, size2); mpi_grid_free(q, size2);
+        if (semi) semi_mg_free(size2);
+        return ret;
+    }
+
     for (int iteration = 1; iteration <= MG_ITER_LIMIT_PB; iteration++) {
-        multigrid_pb_apply(
-            rhs, y, size1, size2, get_n_start(), MG_SOLVE_SM_PB,
-            eps_x, eps_y, eps_z, k2_screen
-        );
+        MG_CYCLE(rhs, y);
 
         double res_norm;
         laplace_filter_pb_residual(
@@ -218,11 +265,14 @@ static int solve_pb_multigrid_correction(
         );
 
         if (res_norm <= tol) {
-            return iteration;
+            ret_all = iteration;
+            break;
         }
     }
 
-    return -1;
+    if (semi) semi_mg_free(size2);
+    return ret_all;
+#undef MG_CYCLE
 }
 
 
