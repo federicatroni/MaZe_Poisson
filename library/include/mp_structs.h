@@ -166,7 +166,8 @@ struct grid {
     int n;  // Number of grid points per dimension
     double L;  // Length of the grid
     double h;  // Grid spacing
-    double eps_s;  // Dielectric constant of the solvent
+    double eps_s;  // Dielectric constant of the solvent (eps_par for a uniaxial solvent)
+    double eps_perp;  // [slit_dsl patch] solvent eps on z edges (uniaxial); = eps_s unless MAZE_EPS_PERP is set
     double eps_int;  // Dielectric constant inside the solute
 
     long int size;  // Total number of grid points

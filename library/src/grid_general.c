@@ -83,6 +83,10 @@ grid * grid_init(int n, double L, double h, double tol, double eps, double eps_i
     new->L = L;
     new->h = h;
     new->eps_s = eps;  // Dielectric constant of the solvent
+    {   // [slit_dsl patch] uniaxial solvent: eps_s on x,y edges, MAZE_EPS_PERP on z edges
+        const char *ep = getenv("MAZE_EPS_PERP");
+        new->eps_perp = (ep != NULL && atof(ep) > 0.0) ? atof(ep) : eps;
+    }
     new->eps_int = eps_int;  // Dielectric constant inside the solute
 
     new->n_local = n;
@@ -485,6 +489,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     const double L    = g->L;
 
     const double eps_s = g->eps_s;
+    const double eps_perp = g->eps_perp;  // [slit_dsl patch] uniaxial background on z edges
     const double eps_m = g->eps_int;
     const double kbar2 = g->kbar2;
 
@@ -543,7 +548,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
                 k2[idx] = region[idx] ? 0.0 : kbar2;
                 eps_x[idx] = eps_mix_eval(eps_m, eps_s, fx[k]);
                 eps_y[idx] = eps_mix_eval(eps_m, eps_s, fy[k]);
-                eps_z[idx] = eps_mix_eval(eps_m, eps_s, fz[k]);
+                eps_z[idx] = eps_mix_eval(eps_m, eps_perp, fz[k]);
             }
         }
 
@@ -593,14 +598,14 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
 
         eps_x[idx] = eps_s;
         eps_y[idx] = eps_s;
-        eps_z[idx] = eps_s;
+        eps_z[idx] = eps_perp;
 
         if (continuous_geometry) {
             double fr[3];
             sphere_edge_fractions3(p, x1, y1, z1, h, L, fr);
             eps_x[idx] = eps_mix_eval(eps_m, eps_s, fr[0]);
             eps_y[idx] = eps_mix_eval(eps_m, eps_s, fr[1]);
-            eps_z[idx] = eps_mix_eval(eps_m, eps_s, fr[2]);
+            eps_z[idx] = eps_mix_eval(eps_m, eps_perp, fr[2]);
             continue;
         }
 
@@ -626,7 +631,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         long idx_pz = (k == n - 1) ? idx - (n - 1) : idx + 1;
         if (region[idx] != region[idx_pz]) {
             double frac = sphere_edge_fraction(p, x1, y1, z1, h, 2, L);
-            eps_z[idx] = eps_mix_eval(eps_m, eps_s, frac);
+            eps_z[idx] = eps_mix_eval(eps_m, eps_perp, frac);
         } else if (region[idx] != 0) {
             eps_z[idx] = eps_m;
         }
@@ -635,6 +640,22 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
 
     free(line_off);
     free(line_cand);
+
+    /* [slit_dsl patch] MAZE_NO_CAVITY=1: point ions in the (uniaxial) solvent. The dielectric map is
+     * uniform (no cavities) but the radii still define the integration balls / owner map of the stress
+     * tensor below, so the ST surface stays ~R away from the CIC charge (a 2-cell ball around a point
+     * charge gives 15-40% force errors at h = 0.5, checked in Python 2026-10-11). */
+    {
+        const char *nc = getenv("MAZE_NO_CAVITY");
+        if (nc != NULL && atoi(nc) != 0) {
+            #pragma omp parallel for schedule(static)
+            for (long idx = 0; idx < size; idx++) {
+                eps_x[idx] = eps_s; eps_y[idx] = eps_s; eps_z[idx] = eps_perp;
+                region[idx] = 0u; k2[idx] = kbar2;
+            }
+            mpi_grid_exchange_bot_top_uint(region, n_local, n);
+        }
+    }
 
     /* ====================================================
      * STEP 3 — mark enlarged sphere (region = 2) and assign an owner

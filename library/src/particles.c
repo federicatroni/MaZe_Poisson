@@ -452,11 +452,85 @@ double particles_compute_forces_tf(particles *p) {
     return compute_tf_forces(p->n_p, p->L, p->pos, p->tf_params, p->r_cut, p->fcs_noel);
 }
 
+/* [slit_dsl patch] soft planar walls (slit pore) added to the non-electrostatic forces.
+ * Enabled by env MAZE_WALL="zc,H,s0_type0,s0_type1,..." (Angstrom): walls at z = zc +- H,
+ * U = eps_w * [(s0/s_top)^48 + (s0/s_bot)^48], s = distance of the ion centre from each wall plane,
+ * s0 per particle type (type order of species.csv). eps_w = kT(298.15 K) in Hartree unless
+ * MAZE_WALL_EPS_HA is set. The walls are purely steric: the dielectric medium is not changed.
+ * Uses the minimum-image z distance from zc, so the slab must sit away from the box edges. */
+static int wall_init = 0, wall_on = 0, wall_ntyp = 0;
+static double wall_zc, wall_H, wall_eps, wall_s0[16];
+static void wall_setup(void) {
+    wall_init = 1;
+    const char *w = getenv("MAZE_WALL");
+    if (w == NULL) return;
+    const double bohr_A = 0.529177210903;
+    double v[18]; int nv = 0;
+    char buf[512]; strncpy(buf, w, 511); buf[511] = 0;
+    for (char *tok = strtok(buf, ","); tok != NULL && nv < 18; tok = strtok(NULL, ",")) v[nv++] = atof(tok);
+    if (nv < 3) { mpi_fprintf(stderr, "MAZE_WALL needs zc,H,s0...\n"); exit(1); }
+    wall_zc = v[0] / bohr_A; wall_H = v[1] / bohr_A; wall_ntyp = nv - 2;
+    for (int t = 0; t < wall_ntyp; t++) wall_s0[t] = v[t + 2] / bohr_A;
+    const char *e = getenv("MAZE_WALL_EPS_HA");
+    wall_eps = (e != NULL) ? atof(e) : 298.15 * 3.166811563e-6;
+    wall_on = 1;
+    mpi_printf("[slit_dsl] soft walls: zc=%g A H=%g A eps=%g Ha, %d types\n", v[0], v[1], wall_eps, wall_ntyp);
+}
+
+static double compute_wall_forces(particles *p, double *forces) {
+    if (!wall_init) wall_setup();
+    if (!wall_on) return 0.0;
+    double U = 0.0;
+    for (int i = 0; i < p->n_p; i++) {
+        const int t = p->types[i];
+        if (t >= wall_ntyp) { mpi_fprintf(stderr, "MAZE_WALL: no s0 for type %d\n", t); exit(1); }
+        double dz = p->pos[3 * i + 2] - wall_zc;
+        dz -= p->L * round(dz / p->L);
+        const double s_top = wall_H - dz, s_bot = wall_H + dz;
+        if (s_top <= 0.0 || s_bot <= 0.0) { mpi_fprintf(stderr, "MAZE_WALL: particle %d crossed a wall (dz=%g bohr)\n", i, dz); exit(1); }
+        const double ut = wall_eps * pow(wall_s0[t] / s_top, 48), ub = wall_eps * pow(wall_s0[t] / s_bot, 48);
+        U += ut + ub;
+        forces[3 * i + 2] += -48.0 * ut / s_top + 48.0 * ub / s_bot;  // -dU/dz
+    }
+    return U;
+}
+
+/* [slit_dsl patch] Yeh-Berkowitz slab correction for a slab periodic in z, in a uniform uniaxial medium
+ * (eps_par on x,y, eps_perp on z, same medium in the gap): E = 2 pi M_z^2 / (eps_perp V), F_iz = -4 pi q_i M_z / (eps_perp V)
+ * (a.u.; from the coordinate stretching z~ = sqrt(eps_par/eps_perp) z, eps_eff = sqrt(eps_par eps_perp)).
+ * M_z = sum_i q_i (z_i - zc), z_i minimum image from the slab centre zc (MAZE_WALL). Enabled by MAZE_SLAB_CORR=1,
+ * eps_perp from MAZE_EPS_PERP. Added to the non-electrostatic forces/energy so that E_work = K + V_notelec - W_elec stays consistent. */
+static double compute_slab_correction(particles *p, double *forces) {
+    static int init = 0, on = 0; static double epp = 1.0;
+    if (!init) {
+        init = 1;
+        const char *c = getenv("MAZE_SLAB_CORR"), *e = getenv("MAZE_EPS_PERP");
+        on = (c != NULL && atoi(c) != 0);
+        if (on) {
+            if (!wall_init) wall_setup();
+            if (!wall_on || e == NULL) { mpi_fprintf(stderr, "MAZE_SLAB_CORR needs MAZE_WALL and MAZE_EPS_PERP\n"); exit(1); }
+            epp = atof(e);
+            mpi_printf("[slit_dsl] Yeh-Berkowitz slab correction ON, eps_perp=%g\n", epp);
+        }
+    }
+    if (!on) return 0.0;
+    const double V = p->L * p->L * p->L;
+    double Mz = 0.0;
+    for (int i = 0; i < p->n_p; i++) {
+        double dz = p->pos[3 * i + 2] - wall_zc; dz -= p->L * round(dz / p->L);
+        Mz += p->charges[i] * dz;
+    }
+    for (int i = 0; i < p->n_p; i++) forces[3 * i + 2] += -4.0 * M_PI * p->charges[i] * Mz / (epp * V);
+    return 2.0 * M_PI * Mz * Mz / (epp * V);
+}
+
 double particles_compute_forces_sc(particles *p) {
-    return compute_sc_forces_pairwise(
+    double U = compute_sc_forces_pairwise(
         p->n_p, p->n_typ, p->L, p->types, p->pos,
         p->sc_params, p->r_cut, p->fcs_noel
     );
+    U += compute_wall_forces(p, p->fcs_noel);
+    return U + compute_slab_correction(p, p->fcs_noel);
 }
 
 double particles_compute_forces_lj(particles *p) { 
@@ -879,7 +953,7 @@ double particles_compute_forces_pb_stress_tensor(particles *p, grid *g) {
     }
 
     compute_stress_tensor_forces(
-        g->n, g->eps_s, g->eps_int, p->n_p, g->L, g->h,
+        g->n, g->eps_s, g->eps_perp, g->eps_int, p->n_p, g->L, g->h,
         g->phi_n, g->region, g->st_owner, g->eps_x, g->eps_y, g->eps_z,
         p->pos, p->solv_radii, p->fcs_elec,
         g->stress_tensor_bc_type == STRESS_TENSOR_BC_TYPE_PBC

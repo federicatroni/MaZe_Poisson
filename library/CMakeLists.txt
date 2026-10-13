@@ -165,3 +165,6 @@ endif()
 install(TARGETS maze_poisson
     LIBRARY DESTINATION .
 )
+if(UNIX AND NOT APPLE)
+    target_link_libraries(maze_poisson PRIVATE mvec m)  # [slit_dsl] glibc vector math for --fast-math on Linux
+endif()

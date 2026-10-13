@@ -730,6 +730,7 @@ typedef struct {
     const unsigned int *region;
     const double *eps[3];
     double eps_s, eps_m, h;
+    double eps_bg[3];  // [slit_dsl patch] uniaxial background: (eps_s, eps_s, eps_perp)
 } st_ss_ctx;
 
 static long st_ss_idx(const st_ss_ctx *c, const int q[3]) {
@@ -768,12 +769,13 @@ static double st_ss_phi_ref(const st_ss_ctx *c, const int m[3], int ax, int s, d
     const double pc = c->phi[st_ss_idx(c, q)];
     *dist = 1.0;
     if (!st_ss_inside(c, q) || st_ss_inside(c, m)) return pc;
-    const double f = st_edge_fraction(st_ss_edge_eps(c, m, ax, s), c->eps_s, c->eps_m);
+    const double eb = c->eps_bg[ax];  // [slit_dsl patch] background eps of this edge axis
+    const double f = st_edge_fraction(st_ss_edge_eps(c, m, ax, s), eb, c->eps_m);
     const double d = 1.0 - f;
     const double pm = c->phi[st_ss_idx(c, m)];
     *dist = d;
     if (d < 1e-9) return pm;
-    return (c->eps_s * f * pm + c->eps_m * d * pc) / (c->eps_s * f + c->eps_m * d);
+    return (eb * f * pm + c->eps_m * d * pc) / (eb * f + c->eps_m * d);
 }
 
 /* -dphi/dx_t at node m: plain centred difference, or the corrected one when
@@ -791,7 +793,7 @@ static double st_ss_dphi_t(const st_ss_ctx *c, const int m[3], int t, int correc
 }
 
 void compute_stress_tensor_forces_pbc(
-    int n, double eps_s, double eps_int, int n_p,
+    int n, double eps_s, double eps_perp, double eps_int, int n_p,
     double L, double h, double *phi, const unsigned int *region,
     const unsigned int *st_owner,
     double *eps_x, double *eps_y, double *eps_z,
@@ -813,6 +815,7 @@ void compute_stress_tensor_forces_pbc(
     ctx.n = n; ctx.phi = phi; ctx.region = region;
     ctx.eps[0] = eps_x; ctx.eps[1] = eps_y; ctx.eps[2] = eps_z;
     ctx.eps_s = eps_s; ctx.eps_m = eps_int; ctx.h = h;
+    ctx.eps_bg[0] = eps_s; ctx.eps_bg[1] = eps_s; ctx.eps_bg[2] = eps_perp;
     const int has_eps = eps_x != NULL && eps_y != NULL && eps_z != NULL;
 
     #pragma omp parallel for
@@ -854,15 +857,16 @@ void compute_stress_tensor_forces_pbc(
                             const long idx_b = st_ss_idx(&ctx, b);
                             int keep;
                             double eps_f;
+                            const double eb = ctx.eps_bg[ax];  // [slit_dsl patch]
                             if (owned) {
                                 keep = (st_owner[idx_b] != (unsigned int)p_idx);
-                                eps_f = has_eps ? st_ss_edge_eps(&ctx, a, ax, s) : eps_s;
+                                eps_f = has_eps ? st_ss_edge_eps(&ctx, a, ax, s) : eb;
                             } else {
                                 int dd[3] = {d[0], d[1], d[2]};
                                 dd[ax] += s;
                                 keep = (dd[0] * dd[0] + dd[1] * dd[1] + dd[2] * dd[2] >= R2) &&
                                        (region == NULL || region[idx_b] == 0);
-                                eps_f = eps_s;
+                                eps_f = eb;
                             }
                             if (!keep) continue;
 
@@ -871,14 +875,14 @@ void compute_stress_tensor_forces_pbc(
                             // Both nodes inside two cavities: the face is evaluated
                             // in the solvent lamina crossed by the edge, if any.
                             const int lamina = in_a && in_b && owned && has_eps &&
-                                (1.0 - st_edge_fraction(eps_f, eps_s, eps_int)) > 1e-9;
+                                (1.0 - st_edge_fraction(eps_f, eb, eps_int)) > 1e-9;
                             const int correct = has_eps && (!(in_a && in_b) || lamina);
 
                             double E[3];
                             E[ax] = -s * (phi[idx_b] - phi[idx_a]) / h;
                             if (correct) {
-                                E[ax] *= eps_f / eps_s;   // D_n continuous along the edge
-                                eps_f = eps_s;
+                                E[ax] *= eps_f / eb;   // D_n continuous along the edge
+                                eps_f = eb;
                             }
                             for (int t = 0; t < 3; t++) {
                                 if (t == ax) continue;
@@ -891,10 +895,18 @@ void compute_stress_tensor_forces_pbc(
                                     E[t] = 0.5 * (da + db);
                                 }
                             }
-                            const double e2 = E[0] * E[0] + E[1] * E[1] + E[2] * E[2];
-                            const double c0 = h2 * stress_prefactor * eps_f * s;
+                            /* [slit_dsl patch] anisotropic Maxwell tensor T_ij = E_i D_j - 1/2 delta_ij E.D.
+                             * D_ax = eps_f E_ax (eps_f = eb on solvent-side faces); transverse D_t uses the
+                             * background eps of axis t on solvent-side faces, eps_f otherwise (inside a
+                             * cavity, isotropic). For eps_perp == eps_s this reduces exactly to the original. */
+                            double D[3];
                             for (int t = 0; t < 3; t++) {
-                                out_forces[p_idx * 3 + t] += c0 * (E[t] * E[ax] - (t == ax ? 0.5 * e2 : 0.0));
+                                D[t] = (t == ax) ? eps_f * E[t] : (correct ? ctx.eps_bg[t] : eps_f) * E[t];
+                            }
+                            const double edd = E[0] * D[0] + E[1] * D[1] + E[2] * D[2];
+                            const double c0 = h2 * stress_prefactor * s;
+                            for (int t = 0; t < 3; t++) {
+                                out_forces[p_idx * 3 + t] += c0 * (E[t] * D[ax] - (t == ax ? 0.5 * edd : 0.0));
                             }
                         }
                     }
@@ -907,7 +919,7 @@ void compute_stress_tensor_forces_pbc(
 }
 
 void compute_stress_tensor_forces(
-    int n, double eps_s, double eps_int, int n_p,
+    int n, double eps_s, double eps_perp, double eps_int, int n_p,
     double L, double h, double *phi, const unsigned int *region,
     const unsigned int *st_owner,
     double *eps_x, double *eps_y, double *eps_z,
@@ -917,7 +929,7 @@ void compute_stress_tensor_forces(
     memset(out_forces, 0, n_p * 3 * sizeof(double));
 
     if (use_pbc) {
-        compute_stress_tensor_forces_pbc(n, eps_s, eps_int, n_p, L, h, phi, region, st_owner,
+        compute_stress_tensor_forces_pbc(n, eps_s, eps_perp, eps_int, n_p, L, h, phi, region, st_owner,
                                          eps_x, eps_y, eps_z, pos, solv_radii, out_forces);
     } else {
         compute_stress_tensor_forces_dbc(n, eps_s, n_p, L, h, phi, region, pos, solv_radii, out_forces);
