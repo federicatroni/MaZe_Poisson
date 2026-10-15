@@ -924,7 +924,27 @@ void particles_compute_forces_tot(particles *p) {
     if (p->fcs_np != NULL) {
         daxpy(p->fcs_np, p->fcs_tot, 1.0, size);
     }
-} 
+
+    // Remove the net force as a common (mass-weighted) acceleration of the mobile ions,
+    // so the total momentum is conserved and relative accelerations are unchanged.
+    double total_mass = 0.0;
+    double total_force[3] = {0.0, 0.0, 0.0};
+    for (int i = 0; i < p->n_p; i++) {
+        if (p->fixed[i]) continue;
+        total_mass += p->mass[i];
+        for (int axis = 0; axis < 3; axis++) {
+            total_force[axis] += p->fcs_tot[3 * i + axis];
+        }
+    }
+    if (total_mass > 0.0) {
+        for (int i = 0; i < p->n_p; i++) {
+            if (p->fixed[i]) continue;
+            for (int axis = 0; axis < 3; axis++) {
+                p->fcs_tot[3 * i + axis] -= p->mass[i] * total_force[axis] / total_mass;
+            }
+        }
+    }
+}
 
 
 void particles_set_fixed(particles *p, const int *fixed) {
