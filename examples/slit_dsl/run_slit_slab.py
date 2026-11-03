@@ -2,7 +2,8 @@
 Solvent eps = diag(eps_par, eps_par, eps_perp) only inside |z - L/2| <= H (H = MAZE_SLIT_H, default 5 A), eps = MAZE_EPS_OUT (default 1) outside.
 model = cav (dielectric cavities, eps_int = 2, radii MAZE_RADII, default 1.5,3.0 A) | point (MAZE_NO_CAVITY=1, radii only set the ST balls).
 Usage: run_slit_slab.py model start.csv outdir N_steps [eps_perp=2.1] [L=40] [h=0.5] [thermostat=0] [stride=1] [seed]
-Env: MAZE_EPS_PAR (default 59.2), MAZE_SLIT_H, MAZE_RADII, MAZE_SC_D (hard15 recommended), MAZE_TOL (default 1e-7), MAZE_DT (fs, default 0.5).
+Env: MAZE_EPS_PAR (default 59.2), MAZE_SLIT_H, MAZE_RADII, MAZE_SC_D (hard15 recommended), MAZE_TOL (default 1e-7), MAZE_DT (fs, default 0.5),
+MAZE_OUT_FORMAT (csv | bin, default csv), MAZE_BIN_PRECISION (float32 | float64, default float32).
 Walls: MAZE_WALL = L/2,H,0.98833*R+,0.98833*R- (types P,M), purely steric. See README.md for the C-library variables."""
 import os, sys, numpy as np
 model, start, outdir, nsteps = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -34,7 +35,8 @@ with open(f'{outdir}/sc.csv', 'w') as f: f.write(f"type1,type2,nu,d\nP,P,48,{dpp
 n_p = sum(1 for _ in open(start)) - 1
 d = {'grid_setting': dict(N=int(round(L/h)), N_p=n_p, L_ang=L, eps_s=epar, eps_int=2.0, N_typs=2, particles_file=f'{outdir}/species.csv',
                           input_file=start, I=0.0, w_ang=0.0),
-     'output_settings': dict(path=f'{outdir}/', print_energy=True, print_solute=True, print_temperature=True, stride=stride, flushstride=10),
+     'output_settings': dict(path=f'{outdir}/', print_energy=True, print_solute=True, print_temperature=True, stride=stride, flushstride=10,
+                             format=os.environ.get('MAZE_OUT_FORMAT', 'csv'), bin_precision=os.environ.get('MAZE_BIN_PRECISION', 'float32')),
      'md_variables': dict(N_steps=nsteps, T=298.15, dt_fs=float(os.environ.get('MAZE_DT', '0.5')), potential='SC', potential_params_file=f'{outdir}/sc.csv',
                           integrator='OVRVO' if thermo else 'VERLET', thermostat=thermo, gamma=1e-3,
                           method='MAZE-MULTIGRID', tol=float(os.environ.get('MAZE_TOL', '1e-7')), poisson_boltzmann=True, eps_map='SPHERE', pb_force='STRESS_TENSOR',
