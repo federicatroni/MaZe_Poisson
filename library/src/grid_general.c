@@ -479,6 +479,152 @@ static double eps_mix_eval(double eps1, double eps2, double frac)
     return wha(eps1, eps2, frac);
 }
 
+/* [slit_dsl patch 2026-10-14] dielectric slab: env MAZE_EPS_OUT = eps_o switches on a different isotropic solvent
+ * outside the slit |z - zc| > H (zc, H from MAZE_WALL, Angstrom). Inside: uniaxial (eps_s on x,y edges, eps_perp on
+ * z edges). x,y edges lying exactly on the interface plane get the arithmetic mean (parallel capacitors); z edges
+ * crossing it the harmonic mean weighted by the inside fraction (series). Unset -> uniform medium, original behaviour.
+ * slab_eps_layers() fills, per grid layer k, the solvent eps of the x,y edges (sx) and of the z edge k -> k+1 (sz). */
+static int slab_eps_init = 0, slab_eps_on = 0;
+static double slab_zc = 0.0, slab_H = 0.0, slab_eps_o = 1.0;
+static void slab_eps_setup(void) {
+    slab_eps_init = 1;
+    const char *e = getenv("MAZE_EPS_OUT"), *w = getenv("MAZE_WALL");
+    if (e == NULL) return;
+    if (w == NULL) { mpi_fprintf(stderr, "MAZE_EPS_OUT needs MAZE_WALL (zc,H)\n"); exit(1); }
+    const double bohr_A = 0.529177210903;
+    double zc_A = 0.0, H_A = 0.0;
+    if (sscanf(w, "%lf,%lf", &zc_A, &H_A) != 2) { mpi_fprintf(stderr, "MAZE_WALL: cannot read zc,H\n"); exit(1); }
+    const char *he = getenv("MAZE_EPS_H");   // [slit_dsl patch 2026-10-15] dielectric interface at zc +- MAZE_EPS_H (A), walls stay at MAZE_WALL H
+    if (he != NULL) H_A = atof(he);
+    slab_zc = zc_A / bohr_A; slab_H = H_A / bohr_A; slab_eps_o = atof(e); slab_eps_on = 1;
+    mpi_printf("[slit_dsl] dielectric slab: inside |z-%g|<%g A uniaxial, outside eps_o=%g\n", zc_A, H_A, slab_eps_o);
+}
+int slab_eps_active(double *zc, double *H, double *eps_o) {
+    if (!slab_eps_init) slab_eps_setup();
+    if (slab_eps_on) { *zc = slab_zc; *H = slab_H; *eps_o = slab_eps_o; }
+    return slab_eps_on;
+}
+/* [electrode patch 2026-10-17] Thomas-Fermi electrodes at fixed potential. Env MAZE_ELECTRODE = "t,lTF,psi_top,psi_bot"
+ * (A, A, V, V; needs MAZE_EPS_OUT). Electrode nodes: H <= |z - zc| < H + t (zc, H of the dielectric slab), top for z > zc.
+ * There eps = eps_o and k2 = eps_o h^2 / lTF^2 (array units: k2 = kappa^2 h^2), i.e. div(eps grad phi) - eps_o/lTF^2 (phi - Psi) = -4 pi rho.
+ * Psi enters the RHS as a fixed grid charge q_e = k2 Psi h / (4 pi) added to grid->q after the ion charges (A phi + 4 pi q/h = 0).
+ * The rest of the cell (|z - zc| >= H + t) is an eps_o spacer that insulates the two electrodes across the periodic boundary.
+ * Integrating the equation over the cell gives total induced charge = -Q_ions (global electroneutrality, as in MetalWalls).
+ * Induced charge per node: -k2 (phi - Psi) h / (4 pi). Recorded per electrode and face (inner half / outer half of the layer)
+ * every MAZE_ELEC_STRIDE field updates to MAZE_ELEC_OUT (default electrode.csv): call,Qtop_in,Qtop_out,Qbot_in,Qbot_out [e]. */
+static int el_init = 0, el_on = 0, el_stride = 10;
+static double el_t = 0.0, el_k2 = 0.0, el_psi[2] = {0.0, 0.0};
+static long el_calls = 0;
+static FILE *el_fp = NULL;
+static void electrode_setup(void) {
+    el_init = 1;
+    const char *e = getenv("MAZE_ELECTRODE");
+    if (e == NULL) return;
+    const double bohr_A = 0.529177210903, Ha_V = 27.211386245988;
+    double t, l, pt, pb;
+    if (sscanf(e, "%lf,%lf,%lf,%lf", &t, &l, &pt, &pb) != 4) { mpi_fprintf(stderr, "MAZE_ELECTRODE: need t,lTF,psi_top,psi_bot\n"); exit(1); }
+    double zc, H, eo;
+    if (!slab_eps_active(&zc, &H, &eo)) { mpi_fprintf(stderr, "MAZE_ELECTRODE needs MAZE_EPS_OUT and MAZE_WALL\n"); exit(1); }
+    if (getenv("MAZE_SLAB_CORR") != NULL) { mpi_fprintf(stderr, "MAZE_ELECTRODE: unset MAZE_SLAB_CORR (electrodes fix the k=0 mode)\n"); exit(1); }
+    el_t = t / bohr_A; el_k2 = eo / ((l / bohr_A) * (l / bohr_A));   /* times h^2 when applied */
+    el_psi[0] = pt / Ha_V; el_psi[1] = pb / Ha_V;
+    const char *s = getenv("MAZE_ELEC_STRIDE"); if (s != NULL && atoi(s) > 0) el_stride = atoi(s);
+    const char *o = getenv("MAZE_ELEC_OUT");
+    el_fp = fopen(o != NULL ? o : "electrode.csv", "w");
+    if (el_fp == NULL) { mpi_fprintf(stderr, "MAZE_ELECTRODE: cannot open output file\n"); exit(1); }
+    fprintf(el_fp, "call,Qtop_in,Qtop_out,Qbot_in,Qbot_out\n");
+    el_on = 1;
+    mpi_printf("[electrode] TF electrodes |z-zc| in [%g, %g) A, lTF %g A, eps %g, Psi top %g V bottom %g V\n", H * bohr_A, H * bohr_A + t, l, eo, pt, pb);
+}
+int electrode_active(void) { if (!el_init) electrode_setup(); return el_on; }
+/* [st wall patch, metal] induced charge of a node of plane k (e), 0 outside the electrodes */
+static int electrode_class(int k, double h, double L);
+double electrode_node_charge(double phi, int k, double h, double L) {
+    if (!electrode_active()) return 0.0;
+    const int c = electrode_class(k, h, L);
+    if (c < 0) return 0.0;
+    return -el_k2 * h * h * (phi - el_psi[c / 2]) * h / (4.0 * M_PI);
+}
+/* layer class of node plane k: 0/1 = top inner/outer, 2/3 = bottom inner/outer, -1 = not an electrode */
+static int electrode_class(int k, double h, double L) {
+    double z = k * h - slab_zc; z -= L * round(z / L);
+    const double a = fabs(z) - slab_H;
+    if (a < -1e-9 * h || a >= el_t - 1e-9 * h) return -1;
+    return (z > 0 ? 0 : 2) + (a >= 0.5 * el_t ? 1 : 0);
+}
+void electrode_apply_k2(grid *g) {
+    if (!electrode_active()) return;
+    const int n = g->n; const double h = g->h, L = g->L;
+    for (long idx = 0; idx < g->size; idx++)
+        if (electrode_class((int)(idx % n), h, L) >= 0) g->k2[idx] = el_k2 * h * h;
+}
+void electrode_add_q(grid *g) {
+    if (!electrode_active()) return;
+    const int n = g->n; const double h = g->h, L = g->L;
+    for (long idx = 0; idx < g->size; idx++) {
+        const int c = electrode_class((int)(idx % n), h, L);
+        if (c >= 0) g->q[idx] += el_k2 * h * h * el_psi[c / 2] * h / (4.0 * M_PI);
+    }
+}
+void electrode_charges(grid *g, double *Q) {   /* Q[4]: top in, top out, bottom in, bottom out (e) */
+    for (int c = 0; c < 4; c++) Q[c] = 0.0;
+    if (!electrode_active()) return;
+    const int n = g->n; const double h = g->h, L = g->L, k2 = el_k2 * h * h;
+    for (long idx = 0; idx < g->size; idx++) {
+        const int c = electrode_class((int)(idx % n), h, L);
+        if (c >= 0) Q[c] -= k2 * (g->phi_n[idx] - el_psi[c / 2]) * h / (4.0 * M_PI);
+    }
+    allreduce_sum(Q, 4);
+}
+void electrode_record(grid *g) {
+    if (!electrode_active()) return;
+    double Q[4];
+    if (el_calls % el_stride == 0) {
+        electrode_charges(g, Q);
+        fprintf(el_fp, "%ld,%.8f,%.8f,%.8f,%.8f\n", el_calls, Q[0], Q[1], Q[2], Q[3]);
+        fflush(el_fp);
+    }
+    el_calls++;
+}
+/* [st wall patch 2026-10-31] MAZE_ST_WALL=1 (dielectric slab, sharp interface, no electrodes): the stress-tensor control volume of
+ * an ion that reaches the interface is closed INSIDE the barrier (first node plane beyond the interface, same columns as the
+ * owned interface-plane nodes) and the force of the enclosed interface patch is subtracted in forces.c (validated in Python:
+ * notes/application/slit_dsl/wall_st, error <= 1% vs FD down to contact). The ST then needs the background (cavity-free)
+ * eps of every edge: slab_bg_layers() returns the last per-layer arrays. */
+static double *bg_sx = NULL, *bg_sz = NULL; static int bg_n = 0;
+int st_wall_active(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("MAZE_ST_WALL"); on = (e != NULL && atoi(e) != 0); }
+    return on;
+}
+int slab_bg_layers(const double **sx, const double **sz, double *zc, double *H, double *eps_o) {
+    if (bg_sx == NULL || !slab_eps_active(zc, H, eps_o)) return 0;
+    *sx = bg_sx; *sz = bg_sz; return bg_n;
+}
+static void slab_eps_layers_impl(int n, double h, double L, double eps_s, double eps_perp, double *sx, double *sz);
+static void slab_eps_layers(int n, double h, double L, double eps_s, double eps_perp, double *sx, double *sz) {
+    slab_eps_layers_impl(n, h, L, eps_s, eps_perp, sx, sz);
+    if (bg_n != n) { free(bg_sx); free(bg_sz); bg_sx = malloc(n * sizeof(double)); bg_sz = malloc(n * sizeof(double)); bg_n = n; }
+    memcpy(bg_sx, sx, n * sizeof(double)); memcpy(bg_sz, sz, n * sizeof(double));
+}
+static void slab_eps_layers_impl(int n, double h, double L, double eps_s, double eps_perp, double *sx, double *sz) {
+    double zc, H, eo;
+    if (!slab_eps_active(&zc, &H, &eo)) {
+        for (int k = 0; k < n; k++) { sx[k] = eps_s; sz[k] = eps_perp; }
+        return;
+    }
+    const double tol = 1e-6 * h;
+    for (int k = 0; k < n; k++) {
+        double d = k * h - zc; d -= L * round(d / L);
+        double ad = fabs(d);
+        sx[k] = (ad < H - tol) ? eps_s : (ad > H + tol ? eo : 0.5 * (eps_s + eo));
+        double lo = d, hi = d + h;                       // z edge k -> k+1, relative to zc
+        double in = fmin(hi, H) - fmax(lo, -H); if (in < 0.0) in = 0.0;
+        double f = in / h; if (f > 1.0) f = 1.0;
+        sz[k] = 1.0 / (f / eps_perp + (1.0 - f) / eo);
+    }
+}
+
 void grid_update_eps_and_k2_sphere(grid *g, particles *p)
 {
     const int n       = g->n;
@@ -499,6 +645,8 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     double       *k2     = g->k2;
     unsigned int *region = g->region;
     unsigned int *owner  = g->st_owner;
+    double *slx = (double *)malloc((size_t)n * sizeof(double)), *slz = (double *)malloc((size_t)n * sizeof(double));
+    slab_eps_layers(n, h, L, eps_s, eps_perp, slx, slz);   // [slit_dsl patch] per-layer solvent eps
 
     /*
      * STEP 2 below always evaluates the analytic edge eps fraction
@@ -546,9 +694,9 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
             for (int k = 0; k < n; k++) {
                 const long idx = base + k;
                 k2[idx] = region[idx] ? 0.0 : kbar2;
-                eps_x[idx] = eps_mix_eval(eps_m, eps_s, fx[k]);
-                eps_y[idx] = eps_mix_eval(eps_m, eps_s, fy[k]);
-                eps_z[idx] = eps_mix_eval(eps_m, eps_perp, fz[k]);
+                eps_x[idx] = eps_mix_eval(eps_m, slx[k], fx[k]);
+                eps_y[idx] = eps_mix_eval(eps_m, slx[k], fy[k]);
+                eps_z[idx] = eps_mix_eval(eps_m, slz[k], fz[k]);
             }
         }
 
@@ -596,16 +744,16 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         double y1 = j * h;
         double z1 = k * h;
 
-        eps_x[idx] = eps_s;
-        eps_y[idx] = eps_s;
-        eps_z[idx] = eps_perp;
+        eps_x[idx] = slx[k];
+        eps_y[idx] = slx[k];
+        eps_z[idx] = slz[k];
 
         if (continuous_geometry) {
             double fr[3];
             sphere_edge_fractions3(p, x1, y1, z1, h, L, fr);
-            eps_x[idx] = eps_mix_eval(eps_m, eps_s, fr[0]);
-            eps_y[idx] = eps_mix_eval(eps_m, eps_s, fr[1]);
-            eps_z[idx] = eps_mix_eval(eps_m, eps_perp, fr[2]);
+            eps_x[idx] = eps_mix_eval(eps_m, slx[k], fr[0]);
+            eps_y[idx] = eps_mix_eval(eps_m, slx[k], fr[1]);
+            eps_z[idx] = eps_mix_eval(eps_m, slz[k], fr[2]);
             continue;
         }
 
@@ -613,7 +761,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         long idx_px = idx + (long)n * n;
         if (region[idx] != region[idx_px]) {
             double frac = sphere_edge_fraction(p, x1, y1, z1, h, 0, L);
-            eps_x[idx] = eps_mix_eval(eps_m, eps_s, frac);
+            eps_x[idx] = eps_mix_eval(eps_m, slx[k], frac);
         } else if (region[idx] != 0) {
             eps_x[idx] = eps_m;
         }
@@ -622,7 +770,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         long idx_py = (j == n - 1) ? idx - (long)(n - 1) * n : idx + n;
         if (region[idx] != region[idx_py]) {
             double frac = sphere_edge_fraction(p, x1, y1, z1, h, 1, L);
-            eps_y[idx] = eps_mix_eval(eps_m, eps_s, frac);
+            eps_y[idx] = eps_mix_eval(eps_m, slx[k], frac);
         } else if (region[idx] != 0) {
             eps_y[idx] = eps_m;
         }
@@ -631,7 +779,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         long idx_pz = (k == n - 1) ? idx - (n - 1) : idx + 1;
         if (region[idx] != region[idx_pz]) {
             double frac = sphere_edge_fraction(p, x1, y1, z1, h, 2, L);
-            eps_z[idx] = eps_mix_eval(eps_m, eps_perp, frac);
+            eps_z[idx] = eps_mix_eval(eps_m, slz[k], frac);
         } else if (region[idx] != 0) {
             eps_z[idx] = eps_m;
         }
@@ -650,7 +798,8 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         if (nc != NULL && atoi(nc) != 0) {
             #pragma omp parallel for schedule(static)
             for (long idx = 0; idx < size; idx++) {
-                eps_x[idx] = eps_s; eps_y[idx] = eps_s; eps_z[idx] = eps_perp;
+                const int kk = idx % n;
+                eps_x[idx] = slx[kk]; eps_y[idx] = slx[kk]; eps_z[idx] = slz[kk];
                 region[idx] = 0u; k2[idx] = kbar2;
             }
             mpi_grid_exchange_bot_top_uint(region, n_local, n);
@@ -678,6 +827,9 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     The comparison uses the true node-centre distance, not the integer offsets,
     so that ties stay rare and do not depend on the lattice orientation.
      * ==================================================== */
+    double slab_zc0 = 0.0, slab_H0 = 0.0, slab_eo0 = 1.0;
+    const int slab_on = slab_eps_active(&slab_zc0, &slab_H0, &slab_eo0);
+    const int st_wall_on = st_wall_active();   /* [st wall patch] dielectric: + first barrier plane below; metal: interface (= first metal) plane only */
     double *owner_metric = (double *)malloc((size_t)size * sizeof(double));
     if (owner_metric == NULL) {
         mpi_fprintf(stderr, "Error: Unable to allocate memory for the integration sphere owner map\n");
@@ -707,6 +859,11 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
                     if (ii < 0 || ii >= n_local) continue;
                     long idx = (long)kk + (long)jj * n + (long)ii * (long)n * n;
                     if (region[idx] == 0) region[idx] = 2u;
+                    if (slab_on) {   // [slit_dsl patch] control volumes stop below the dielectric interface (closed surface in the slab medium)
+                        double dzs = kk * h - slab_zc0; dzs -= L * round(dzs / L);
+                        if (st_wall_on) { if (fabs(dzs) > slab_H0 + 1e-6 * h) continue; }   // [st wall patch] interface plane allowed
+                        else if (fabs(dzs) > slab_H0 - 1e-6 * h) continue;
+                    }
 
                     // Minimum-image distance between the node and the particle
                     double dx = ii_g * h - p->pos[q * 3 + 0];
@@ -727,6 +884,20 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
         }
     }
     free(owner_metric);
+    if (st_wall_on && !electrode_active() && slab_on) {
+        /* [st wall patch] first barrier plane: owned by the owner of the interface-plane node of the same column, so the
+         * enclosed interface patch is exactly the owned interface cross-section and the bottom (top) face lies at z_if -+ 1.5 h */
+        for (int kk = 0; kk < n; kk++) {
+            double dzs = kk * h - slab_zc0; dzs -= L * round(dzs / L);
+            if (fabs(fabs(dzs) - slab_H0) > 1e-6 * h) continue;          // interface plane
+            const int ko = pbc_grid_index(kk + (dzs > 0 ? 1 : -1), n);  // first plane in the barrier
+            for (int ii = 0; ii < n_local; ii++) for (int jj = 0; jj < n; jj++) {
+                const long ia = (long)kk + (long)jj * n + (long)ii * (long)n * n, ib = (long)ko + (long)jj * n + (long)ii * (long)n * n;
+                owner[ib] = owner[ia];
+            }
+        }
+    }
+    free(slx); free(slz);
 
     // Exchange the final region map used by the stress tensor
     mpi_grid_exchange_bot_top_uint(region, n_local, n);
@@ -734,6 +905,7 @@ void grid_update_eps_and_k2_sphere(grid *g, particles *p)
     // ghost slice of the adjacent rank. The reset loop above only covers
     // [0, size), so the ghosts would otherwise stay stale from the second call on.
     mpi_grid_exchange_bot_top_uint(owner, n_local, n);
+    electrode_apply_k2(g);   /* [electrode patch] */
 }
 
 void grid_update_eps_and_k2(grid *g, particles *p) {

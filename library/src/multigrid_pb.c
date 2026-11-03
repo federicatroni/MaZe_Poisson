@@ -16,8 +16,13 @@
 
 double mg_pb_corr_scale = MG_PB_CORR_SCALE;
 int mg_pb_maxdepth = MG_PB_MAXDEPTH;
+/* [dsl patch 2026-10-30] k2 in index units is kappa^2 h^2: on a grid with h_c = 2h it must be 4x the fine average to stay consistent
+ * with the corr_scale = 4 convention of the Laplacian part (coarse equation = index-unit operator / 4). Env MAZE_MG_K2SCALE (default 1 =
+ * original behaviour: coarse screening 4x too weak, harmless for PB but breaks Thomas-Fermi electrodes, k2 >> eps). */
+double mg_pb_k2_scale = 1.0;
 
 void mg_pb_env_init(void) {
+    const char *c = getenv("MAZE_MG_K2SCALE"); if (c != NULL && atof(c) > 0.0) mg_pb_k2_scale = atof(c);
     const char *a = getenv("MAZE_MG_CORR_SCALE"), *b = getenv("MAZE_MG_MAXDEPTH");
     if (a != NULL && atof(a) > 0.0) mg_pb_corr_scale = atof(a);
     if (b != NULL && atoi(b) > 0) mg_pb_maxdepth = atoi(b);
@@ -707,7 +712,7 @@ void restriction_k2screen(const double *in, double *out, int s1, int s2, int n_s
                     in[i1 + j0 + k0] + in[i1 + j0 + k1] +
                     in[i1 + j1 + k0] + in[i1 + j1 + k1];
 
-                out[a + b + c] = inv8 * sum;
+                out[a + b + c] = inv8 * mg_pb_k2_scale * sum;
             }
         }
     }

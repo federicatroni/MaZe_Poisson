@@ -500,6 +500,7 @@ static double compute_wall_forces(particles *p, double *forces) {
  * (a.u.; from the coordinate stretching z~ = sqrt(eps_par/eps_perp) z, eps_eff = sqrt(eps_par eps_perp)).
  * M_z = sum_i q_i (z_i - zc), z_i minimum image from the slab centre zc (MAZE_WALL). Enabled by MAZE_SLAB_CORR=1,
  * eps_perp from MAZE_EPS_PERP. Added to the non-electrostatic forces/energy so that E_work = K + V_notelec - W_elec stays consistent. */
+int slab_eps_active(double *zc, double *H, double *eps_o);   // grid_general.c [slit_dsl patch 2026-10-14]
 static double compute_slab_correction(particles *p, double *forces) {
     static int init = 0, on = 0; static double epp = 1.0;
     if (!init) {
@@ -514,15 +515,24 @@ static double compute_slab_correction(particles *p, double *forces) {
         }
     }
     if (!on) return 0.0;
+    /* [slit_dsl patch 2026-10-14] with a dielectric slab (MAZE_EPS_OUT) the periodic (tinfoil) k=0 mode differs from the
+     * isolated slab by 2 pi M_z^2 / (A eps_perp^2 Linv), Linv = int dz/eps = 2H/eps_perp + (L-2H)/eps_o (charges inside the
+     * slab only); reduces to 2 pi M_z^2/(eps_perp V) for eps_o = eps_perp. */
+    double szc, sH, seo, epsz_eff = epp;
+    if (slab_eps_active(&szc, &sH, &seo)) {
+        const double Linv = 2.0 * sH / epp + (p->L - 2.0 * sH) / seo;
+        epsz_eff = epp * epp * Linv / p->L;
+    }
     const double V = p->L * p->L * p->L;
     double Mz = 0.0;
     for (int i = 0; i < p->n_p; i++) {
         double dz = p->pos[3 * i + 2] - wall_zc; dz -= p->L * round(dz / p->L);
         Mz += p->charges[i] * dz;
     }
-    for (int i = 0; i < p->n_p; i++) forces[3 * i + 2] += -4.0 * M_PI * p->charges[i] * Mz / (epp * V);
-    return 2.0 * M_PI * Mz * Mz / (epp * V);
+    for (int i = 0; i < p->n_p; i++) forces[3 * i + 2] += -4.0 * M_PI * p->charges[i] * Mz / (epsz_eff * V);
+    return 2.0 * M_PI * Mz * Mz / (epsz_eff * V);
 }
+
 
 double particles_compute_forces_sc(particles *p) {
     double U = compute_sc_forces_pairwise(

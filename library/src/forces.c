@@ -792,6 +792,11 @@ static double st_ss_dphi_t(const st_ss_ctx *c, const int m[3], int t, int correc
     return -(pp - pmn) / ((dp + dm) * c->h);
 }
 
+int st_wall_active(void);   /* [st wall patch] grid_general.c */
+int electrode_active(void);
+int slab_bg_layers(const double **sx, const double **sz, double *zc, double *H, double *eps_o);
+double electrode_node_charge(double phi, int k, double h, double L);
+
 void compute_stress_tensor_forces_pbc(
     int n, double eps_s, double eps_perp, double eps_int, int n_p,
     double L, double h, double *phi, const unsigned int *region,
@@ -817,14 +822,25 @@ void compute_stress_tensor_forces_pbc(
     ctx.eps_s = eps_s; ctx.eps_m = eps_int; ctx.h = h;
     ctx.eps_bg[0] = eps_s; ctx.eps_bg[1] = eps_s; ctx.eps_bg[2] = eps_perp;
     const int has_eps = eps_x != NULL && eps_y != NULL && eps_z != NULL;
+    /* [st wall patch] background eps per layer (x,y edges of plane k: bsx[k]; z edge k -> k+1: bsz[k]) and the barrier closure */
+    const double *bsx = NULL, *bsz = NULL; double wzc = 0.0, wH = 0.0, weo = 1.0;
+    const int wall_any = st_wall_active() && slab_bg_layers(&bsx, &bsz, &wzc, &wH, &weo) == n;
+    const int wall = wall_any && !electrode_active();
+    /* [st wall patch, metal] grounded TF electrode: the control volume includes the owned nodes of the first metal plane
+     * (interface plane) and is closed inside the metal; the force on the enclosed induced charge, sum q_ind E (node field), is
+     * subtracted (analogue of the dielectric interface patch). */
+    const int wallm = wall_any && electrode_active();
+    /* With the slab clip the owner map has unowned nodes inside the integration balls (beyond the interface); the old
+     * geometric fallback would add open pieces of ball surface in the barrier: with MAZE_ST_WALL they are skipped. */
+    const int st_skip_unowned = wall_any;
 
     #pragma omp parallel for
     for (int p_idx = 0; p_idx < n_p; p_idx++) {
         const int ip = round(pos[p_idx * 3 + 0] / h);
         const int jp = round(pos[p_idx * 3 + 1] / h);
         const int kp = round(pos[p_idx * 3 + 2] / h);
-        const int num_points_min = ceil(solv_radii[p_idx] / h) + 1;
-        const int R2 = (num_points_min + 1) * (num_points_min + 1);
+        const int num_points_min = ceil(solv_radii[p_idx] / h) + 1 + (wall_any ? 1 : 0);   // [st wall patch] barrier plane can lie 1 node beyond the ball
+        const int R2 = wall_any ? (num_points_min + 2) * (num_points_min + 2) : (num_points_min + 1) * (num_points_min + 1);
 
         for (int di = -num_points_min; di <= num_points_min; di++) {
             const int i = pbc_grid_index(ip + di, n) - n_start; // Local index
@@ -844,10 +860,24 @@ void compute_stress_tensor_forces_pbc(
                     const int owned = (st_owner != NULL && st_owner[idx_a] != ST_OWNER_NONE);
                     if (owned) {
                         if (st_owner[idx_a] != (unsigned int)p_idx) continue;
+                    } else if (st_skip_unowned) {
+                        continue;   // [st wall patch] owner map in use: a node of nobody is outside every control volume
                     } else {
                         if (region != NULL && region[idx_a] == 1) continue;
                     }
                     const int d[3] = {di, dj, dk};
+                    if (wallm && owned) {   /* [st wall patch, metal] subtract the force on the enclosed induced charge */
+                        double dza = a[2] * h - wzc; dza -= L * round(dza / L);
+                        if (fabs(fabs(dza) - wH) < 1e-6 * h) {
+                            const double qn = electrode_node_charge(phi[idx_a], a[2], h, L);
+                            for (int t = 0; t < 3; t++) {
+                                int bp[3] = {a[0], a[1], a[2]}, bm[3] = {a[0], a[1], a[2]};
+                                bp[t] += 1; bm[t] -= 1;
+                                const double Et = -(phi[st_ss_idx(&ctx, bp)] - phi[st_ss_idx(&ctx, bm)]) / (2.0 * h);
+                                out_forces[p_idx * 3 + t] -= qn * Et;
+                            }
+                        }
+                    }
 
                     // The six faces of node a: normal along axis `ax`, sign `s`.
                     for (int ax = 0; ax < 3; ax++) {
@@ -857,7 +887,14 @@ void compute_stress_tensor_forces_pbc(
                             const long idx_b = st_ss_idx(&ctx, b);
                             int keep;
                             double eps_f;
-                            const double eb = ctx.eps_bg[ax];  // [slit_dsl patch]
+                            double eb = ctx.eps_bg[ax];  // [slit_dsl patch]
+                            double ebt[3] = {ctx.eps_bg[0], ctx.eps_bg[1], ctx.eps_bg[2]};
+                            if (wall_any) {   // [st wall patch] local background eps of this face (barrier faces: eps_o)
+                                const int ka = a[2], kb = pbc_grid_index(a[2] + (ax == 2 ? s : 0), n);
+                                const int klo = (ax == 2) ? (s > 0 ? ka : kb) : ka;
+                                if (ax == 2) { eb = bsz[klo]; ebt[0] = ebt[1] = 0.5 * (bsx[ka] + bsx[kb]); ebt[2] = eb; }
+                                else { eb = bsx[ka]; ebt[0] = ebt[1] = eb; ebt[2] = 0.5 * (bsz[ka] + bsz[pbc_grid_index(ka - 1, n)]); }
+                            }
                             if (owned) {
                                 keep = (st_owner[idx_b] != (unsigned int)p_idx);
                                 eps_f = has_eps ? st_ss_edge_eps(&ctx, a, ax, s) : eb;
@@ -876,6 +913,8 @@ void compute_stress_tensor_forces_pbc(
                             // in the solvent lamina crossed by the edge, if any.
                             const int lamina = in_a && in_b && owned && has_eps &&
                                 (1.0 - st_edge_fraction(eps_f, eb, eps_int)) > 1e-9;
+                            st_ss_ctx lctx = ctx;   // [st wall patch] local background for the cavity-side corrections
+                            if (wall_any) { lctx.eps_bg[0] = ebt[0]; lctx.eps_bg[1] = ebt[1]; lctx.eps_bg[2] = ebt[2]; lctx.eps_bg[ax] = eb; }
                             const int correct = has_eps && (!(in_a && in_b) || lamina);
 
                             double E[3];
@@ -887,8 +926,8 @@ void compute_stress_tensor_forces_pbc(
                             for (int t = 0; t < 3; t++) {
                                 if (t == ax) continue;
                                 if (lamina) { E[t] = 0.0; continue; }
-                                const double da = st_ss_dphi_t(&ctx, a, t, correct);
-                                const double db = st_ss_dphi_t(&ctx, b, t, correct);
+                                const double da = st_ss_dphi_t(&lctx, a, t, correct);
+                                const double db = st_ss_dphi_t(&lctx, b, t, correct);
                                 if (correct && (in_a != in_b)) {
                                     E[t] = in_a ? db : da;
                                 } else {
@@ -901,12 +940,25 @@ void compute_stress_tensor_forces_pbc(
                              * cavity, isotropic). For eps_perp == eps_s this reduces exactly to the original. */
                             double D[3];
                             for (int t = 0; t < 3; t++) {
-                                D[t] = (t == ax) ? eps_f * E[t] : (correct ? ctx.eps_bg[t] : eps_f) * E[t];
+                                D[t] = (t == ax) ? eps_f * E[t] : (correct ? (wall_any ? ebt[t] : ctx.eps_bg[t]) : eps_f) * E[t];
                             }
                             const double edd = E[0] * D[0] + E[1] * D[1] + E[2] * D[2];
                             const double c0 = h2 * stress_prefactor * s;
                             for (int t = 0; t < 3; t++) {
                                 out_forces[p_idx * 3 + t] += c0 * (E[t] * D[ax] - (t == ax ? 0.5 * edd : 0.0));
+                            }
+                            if (wall && ax == 2) {
+                                /* [st wall patch] closing face in the barrier (a in the first barrier plane, b beyond it):
+                                 * subtract the force of the enclosed interface patch, int (T_zz^slab - T_zz^barrier) dA with
+                                 * D_z, E_t continuous across the interface and read on this face:
+                                 * J = 1/2 D_z^2 (1/eps_perp - 1/eps_o) - 1/2 E_t^2 (eps_par - eps_o); bottom: -J dA, top: +J dA. */
+                                double dza = a[2] * h - wzc; dza -= L * round(dza / L);
+                                const int a_bar = fabs(fabs(dza) - (wH + h)) < 1e-6 * h, outward = (dza > 0) == (s > 0);
+                                if (a_bar && outward) {
+                                    const double J = 0.5 * D[2] * D[2] * (1.0 / eps_perp - 1.0 / weo)
+                                                   - 0.5 * (E[0] * E[0] + E[1] * E[1]) * (eps_s - weo);
+                                    out_forces[p_idx * 3 + 2] += c0 * J;
+                                }
                             }
                         }
                     }

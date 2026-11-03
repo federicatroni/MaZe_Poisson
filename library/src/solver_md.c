@@ -124,6 +124,11 @@ int solver_update_charges() {
     g_particles->update_nearest_neighbors(g_particles);
     q_tot_loc = g_grid->update_charges(g_grid, g_particles);
 
+    /* [electrode patch] with electrodes a net ionic charge is allowed (compensated by the induced charge): take it from the first call */
+    static int first_call = 1;
+    if (first_call && getenv("MAZE_ELECTRODE") != NULL) q_tot = q_tot_loc;
+    first_call = 0;
+
     if (fabs(q_tot - q_tot_loc) > 1e-6) {
         res = 1;
         printf("Charge conservation error: q_tot = %.6f, q_tot_loc = %.6f\n", q_tot, q_tot_loc);

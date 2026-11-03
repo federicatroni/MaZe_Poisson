@@ -11,6 +11,9 @@
 #include "mpi_base.h"
 #include "multigrid.h"
 
+void electrode_add_q(grid *g);   /* [electrode patch] grid_general.c */
+void electrode_record(grid *g);
+
 #ifdef __MPI
 void maze_lcg_grid_init_mpi(grid *grid) {
     mpi_data *mpid = get_mpi_data();
@@ -121,6 +124,7 @@ void maze_lcg_grid_init_field(grid *grid) {
     } else {
         conj_grad(grid->phi_n, grid->y, grid->phi_n, grid->tol, grid->n_local, grid->n);
     }
+    electrode_record(grid);   /* [electrode patch] */
 }
 
 int maze_lcg_grid_update_field(grid *grid) {
@@ -163,13 +167,16 @@ int maze_lcg_grid_update_field(grid *grid) {
             precond
         );
     }
+    electrode_record(grid);   /* [electrode patch] */
     return res;
 }   
 
 double maze_lcg_grid_update_charges(grid *grid, particles *p) {
-    return update_charges(
+    double r = update_charges(
         grid->n, p->n_p, grid->h, p->num_neighbors,
         p->pos, p->neighbors, p->charges, grid->q,
         p->charges_spread_func
     );
+    electrode_add_q(grid);   /* [electrode patch] */
+    return r;
 }

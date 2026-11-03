@@ -12,13 +12,17 @@
 #include "multigrid.h"
 #include "multigrid_pb.h"
 
+int electrode_active(void);   /* [electrode patch] grid_general.c */
+void electrode_add_q(grid *g);
+void electrode_record(grid *g);
+
 #define PB_GAUGE_FIX_STRIDE 1000L
 
 static int pb_operator_has_constant_zero_mode(const grid *g) {
     /* The PB stencil used here is periodic.  At zero ionic strength k2 is
        identically zero, so adding a constant to the potential changes no
        physical field and belongs to the null space of the operator. */
-    return g->pb_enabled && g->kbar2 == 0.0;
+    return g->pb_enabled && g->kbar2 == 0.0 && !electrode_active();   /* [electrode patch] k2 > 0 in the electrodes */
 }
 
 static void center_pb_verlet_fields(grid *g) {
@@ -130,6 +134,7 @@ void maze_multigrid_grid_init_field(grid *grid) {
     if (pb_operator_has_constant_zero_mode(grid)) {
         center_pb_verlet_fields(grid);
     }
+    electrode_record(grid);   /* [electrode patch] */
 
     mpi_grid_free(tmp, grid->n);
 }
@@ -179,14 +184,17 @@ int maze_multigrid_grid_update_field(grid *grid) {
         fprintf(stderr, "Maze Multigrid with preconditioner not implemented yet.\n");
         exit(1);
     }
+    electrode_record(grid);   /* [electrode patch] */
 
     return res;
 }   
 
 double maze_multigrid_grid_update_charges(grid *grid, particles *p) {
-    return update_charges(
+    double r = update_charges(
         grid->n, p->n_p, grid->h, p->num_neighbors,
         p->pos, p->neighbors, p->charges, grid->q,
         p->charges_spread_func
     );
+    electrode_add_q(grid);   /* [electrode patch] fixed RHS of the electrode potentials */
+    return r;
 }
