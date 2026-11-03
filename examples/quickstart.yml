@@ -1,0 +1,25 @@
+grid_setting:
+  N: 40
+  N_p: 2
+  N_typs: 2
+  L_ang: 20.0
+  input_file: examples/quickstart/positions.csv
+  particles_file: examples/quickstart/species.csv
+  cas: CIC
+  charge_smoothing: NONE
+
+md_variables:
+  N_steps: 2
+  T: 300
+  dt_fs: 0.25
+  method: MAZE-MULTIGRID
+  potential: LJ
+  potential_params_file: examples/quickstart/lj.csv
+  elec: true
+  not_elec: false
+
+output_settings:
+  path: examples/quickstart/output
+  print_energy: true
+  print_temperature: true
+  stride: 1

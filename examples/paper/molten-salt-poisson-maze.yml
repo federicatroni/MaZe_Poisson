@@ -1,0 +1,29 @@
+# Short, self-contained run adapted from the paper's NaCl Poisson MaZe setup.
+grid_setting:
+  N: 120
+  N_p: 250
+  N_typs: 2
+  L_ang: 20.64
+  cas: SPL_CUBIC
+  particles_file: examples/paper/data/molten-salt/species.csv
+  input_file: examples/paper/data/molten-salt/positions.csv
+  charge_smoothing: NONE
+
+md_variables:
+  method: MAZE-MULTIGRID
+  N_steps: 2
+  T: 1500
+  dt_fs: 0.25
+  rescale: true
+  tol: 1.0e-7
+  thermostat: false
+  elec: true
+  not_elec: true
+  potential: TF
+  potential_params_file: examples/paper/data/molten-salt/tosi_fumi.csv
+
+output_settings:
+  path: examples/paper/output/molten-salt-poisson-maze
+  print_energy: true
+  print_temperature: true
+  stride: 1

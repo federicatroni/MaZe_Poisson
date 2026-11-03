@@ -1,0 +1,34 @@
+# Short, self-contained run adapted from the paper's SPC/FW P3MaZe setup.
+grid_setting:
+  N: 40
+  N_p: 648
+  N_typs: 2
+  L_ang: 18.552
+  cas: SPL_CUBIC
+  particles_file: examples/paper/data/water/species.csv
+  input_file: examples/paper/data/water/positions.csv
+  charge_smoothing: GAUSS
+  smoothing_rcut: 6.0
+  smoothing_sigma: 1.87
+
+md_variables:
+  method: MAZE-MULTIGRID
+  N_steps: 2
+  T: 298.15
+  dt_fs: 0.5
+  rescale: true
+  tol: 1.0e-7
+  thermostat: false
+  elec: true
+  not_elec: true
+  iswater: true
+  potential: LJ
+  potential_params_file: examples/paper/data/water/lennard_jones.csv
+  neighbor_r_cut_ang: 9
+  lj_force_shift: false
+
+output_settings:
+  path: examples/paper/output/water-p3maze
+  print_energy: true
+  print_temperature: true
+  stride: 1

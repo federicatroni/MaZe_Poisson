@@ -160,6 +160,23 @@ cython_debug/
 
 examples/Outputs/**/*.csv
 examples/**
+!examples/quickstart.yml
+!examples/p3maze.yml
+!examples/quickstart/
+examples/quickstart/output/
+!examples/quickstart/positions.csv
+!examples/quickstart/p3maze-positions.csv
+!examples/quickstart/species.csv
+!examples/quickstart/lj.csv
+!examples/paper/
+!examples/paper/*.yml
+!examples/paper/README.md
+!examples/paper/data/
+!examples/paper/data/molten-salt/
+!examples/paper/data/molten-salt/*.csv
+!examples/paper/data/water/
+!examples/paper/data/water/*.csv
+examples/paper/output/
 functions.cpp
 .DS_Store
 examples/cluster_log_files/**/*.out/

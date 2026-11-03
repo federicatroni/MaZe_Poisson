@@ -1,0 +1,4 @@
+type1,type2,sigma,epsilon
+Na,Na,3,0.1
+Na,Cl,3,0.1
+Cl,Cl,3,0.1

@@ -7,16 +7,17 @@ build-backend = "flit_core.buildapi"
 # See https://www.python.org/dev/peps/pep-0621/
 name = "maze_poisson"
 dynamic = ["version"] # read from maze_poisson/__init__.py
-description = ""
+description = "Molecular dynamics with Poisson MaZe and P3MaZe electrostatics"
 authors = [
-    { name = "" },
+    { name = "Federica Troni" },
+    { name = "Davide Grassano" },
 ]
 readme = "README.md"
 license = { file = "LICENSE.txt" }
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -24,7 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 keywords = ["MaZe", "Poisson", "molecular", "dynamics", "simulation", "analysis", "visualization"]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "scipy",
@@ -34,8 +35,9 @@ dependencies = [
     "click",
 ]
 
-# [project.urls]
-# Source = "https://github.com/XXX"
+[project.urls]
+Source = "https://github.com/federicatroni/MaZe_Poisson"
+Issues = "https://github.com/federicatroni/MaZe_Poisson/issues"
 
 [project.optional-dependencies]
 fancy = [

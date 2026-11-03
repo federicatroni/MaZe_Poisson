@@ -1,8 +1,5 @@
 from .click_wrapper import click
 from .maze import maze
-from .plotters.plot_force import plot_force, plot_forcemod
-from .plotters.plot_scaling import *
-from .plotters.plot_T_E_tot import *
 
 filename_argument = click.argument(
     'filename',
@@ -60,23 +57,23 @@ def plot():
 @plot.command()
 @filename_argument
 @dt_option
-@therm_option
-def force(filename, dt, therm): 
-    plot_force(filename, dt, therm)
+def force(filename, dt):
+    from .plotters.plot_force import plot_force
+    plot_force(filename, dt)
 
 @plot.command()
 @filename_argument
 @dt_option
-@therm_option
-def forcemod(filename, dt, therm):
-    plot_forcemod(filename, dt, therm)
+def forcemod(filename, dt):
+    from .plotters.plot_force import plot_forcemod
+    plot_forcemod(filename, dt)
     
 @plot.command()
 @filename_argument
 @dt_option
-@therm_option
-def temperature(filename, dt, therm):
-    PlotT(filename, dt, therm)
+def temperature(filename, dt):
+    from .plotters.plot_T_E_tot import PlotT
+    PlotT(filename, dt)
     
 @plot.command()
 @filename_argument
@@ -87,43 +84,53 @@ def temperature(filename, dt, therm):
 @L_option
 @filename_argument_solute
 def energy(filename, filename_solute, dt, n, np, l):
+    from .plotters.plot_T_E_tot import plot_Etot_trp
     plot_Etot_trp(filename, filename_solute, dt, n, np, l)
 
 @plot.command()
 @Np_option
 def time_vs_N3(np):
+    from .plotters.plot_scaling import plot_time_iterNgrid
     plot_time_iterNgrid(np)
 
 @plot.command()
 @Np_option
 def n_iter_vs_N3(np):
+    from .plotters.plot_scaling import plot_convNgrid
     plot_convNgrid(np)
     
 @plot.command()
 def time_vs_Np():
+    from .plotters.plot_scaling import plot_scaling_particles_time_iters
     plot_scaling_particles_time_iters()
 
 @plot.command()
 def iter_vs_Np():
+    from .plotters.plot_scaling import plot_scaling_particles_conv
     plot_scaling_particles_conv()
 
 @plot.command()
 @filename_argument
 def visualize(filename):
+    from .plotters.plot_T_E_tot import visualize_particles
     visualize_particles(filename)
 
 @plot.command()
 def time_vs_thread():
+    from .plotters.plot_scaling import time_vs_threads
     time_vs_threads()
 
 @plot.command()
 def strong_scaling_vs_thread():
+    from .plotters.plot_scaling import strong_scaling_vs_threads
     strong_scaling_vs_threads()
 
 @plot.command()
 def weak_scaling_vs_thread():
+    from .plotters.plot_scaling import weak_scaling_vs_threads
     weak_scaling_vs_threads()
 
 @plot.command()
 def iter_vs_tols():
+    from .plotters.plot_scaling import iter_vs_tol
     iter_vs_tol()
